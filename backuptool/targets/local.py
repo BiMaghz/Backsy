@@ -1,0 +1,117 @@
+import logging
+import subprocess
+import shutil
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+from .base import BaseTarget
+
+logger = logging.getLogger(__name__)
+
+def _is_tool_available(name: str) -> bool:
+    return shutil.which(name) is not None
+
+class LocalTarget(BaseTarget):
+
+    def _backup_database(self, db_config: dict, target_dir: Path) -> bool:
+        if not db_config.get('enable', False):
+            return True
+
+        db_type = db_config.get('type', '').lower()
+        container = db_config['container']
+        db_name = db_config['name']
+        db_pass = db_config.get('password')
+
+        logger.info(f"Starting local Docker DB backup for '{db_name}' from container '{container}'...")
+        try:
+            if db_type in ['mysql', 'mariadb']:
+                dump_tool = 'mariadb-dump' if db_type == 'mariadb' else 'mysqldump'
+                backup_file = target_dir / f"{db_name}_backup.sql"
+                cmd = [
+                    'docker', 'exec', '-i', '-e', f"MYSQL_PWD={db_pass}", container,
+                    dump_tool, f"--user={db_config['user']}", '--single-transaction',
+                    '--routines', '--triggers', db_name
+                ]
+                with open(backup_file, 'w', encoding='utf-8') as f:
+                    subprocess.run(cmd, stdout=f, stderr=subprocess.PIPE, check=True, text=True)
+            
+            elif db_type == 'postgresql':
+                temp_backup_path = f"/tmp/{db_name}_backup.pgdump"
+                final_backup_file = target_dir / f"{db_name}_backup.pgdump"
+                dump_cmd = [
+                    'docker', 'exec', '-e', f"PGPASSWORD={db_pass}", container,
+                    'pg_dump', f"-U{db_config['user']}", f"-d{db_name}",
+                    '--format=c', f"--file={temp_backup_path}"
+                ]
+                copy_cmd = ['docker', 'cp', f"{container}:{temp_backup_path}", str(final_backup_file)]
+                cleanup_cmd = ['docker', 'exec', container, 'rm', temp_backup_path]
+                
+                subprocess.run(dump_cmd, check=True, capture_output=True)
+                subprocess.run(copy_cmd, check=True, capture_output=True)
+                subprocess.run(cleanup_cmd, check=False)
+            
+            logger.info(f"Local Docker DB backup for '{db_name}' completed successfully.")
+            return True
+        except (subprocess.CalledProcessError, FileNotFoundError) as e:
+            error = e.stderr.decode().strip() if hasattr(e, 'stderr') else str(e)
+            logger.error(f"Failed to dump local Docker database: {error}")
+            return False
+
+    def execute(self) -> Path | None:
+        logger.info(f"Executing local backup for target '{self.name}'...")
+        target_tmp_dir = self.tmp_dir / f"target_{self.name}"
+        if target_tmp_dir.exists():
+            shutil.rmtree(target_tmp_dir)
+        target_tmp_dir.mkdir(parents=True)
+
+        try:
+            if not self._backup_database(self.config.get('database', {}), target_tmp_dir):
+                return None
+
+            logger.info(f"Syncing local paths for target '{self.name}'...")
+            rsync_cmd = ['rsync', '-a']
+            for ex in self.config.get('exclude', []):
+                rsync_cmd.append(f"--exclude={ex}")
+            
+            for path_str in self.config.get('paths', []):
+                source_path = Path(path_str)
+                if source_path.exists():
+                    subprocess.run(rsync_cmd + [str(source_path), str(target_tmp_dir)], check=True)
+                else:
+                    logger.warning(f"Local path not found, skipping: {source_path}")
+
+            archive_name = f"{datetime.now(timezone.utc).strftime('%Y-%m-%d')}_{self.name}.tar.gz"
+            archive_path = self.tmp_dir / archive_name
+            
+            root_folder_name = archive_name.replace(".tar.gz", "")
+            transform_flag = f"--transform='s,^.,{root_folder_name},S'"
+            
+            if _is_tool_available('pigz'):
+                logger.info("Using 'pigz' for fast, parallel compression.")
+                command_str = f"tar -cf - {transform_flag} -C {target_tmp_dir} . | pigz -9 > {archive_path}"
+                subprocess.run(command_str, shell=True, check=True, capture_output=True, text=True)
+            else:
+                logger.info("Pigz not found. Falling back to standard gzip.")
+                command_list = [
+                    'tar',
+                    '-czf', str(archive_path),
+                    transform_flag,
+                    '-C', str(target_tmp_dir),
+                    '.'
+                ]
+                subprocess.run(" ".join(command_list), shell=True, check=True, capture_output=True, text=True)
+
+            archive_size_mb = os.path.getsize(archive_path) / (1024 * 1024)
+            logger.info(f"Local archive created successfully! Size: {archive_size_mb:.2f} MB")
+            return archive_path
+
+        except subprocess.CalledProcessError as e:
+            error_output = e.stderr if e.stderr else e.stdout
+            logger.error(f"Archive creation failed for '{self.name}': {error_output}")
+            return None
+        except Exception as e:
+            logger.error(f"An unexpected error occurred during local target execution: {e}", exc_info=True)
+            return None
+        finally:
+            shutil.rmtree(target_tmp_dir)
+            logger.info(f"Cleaned up temporary directory: {target_tmp_dir}")
