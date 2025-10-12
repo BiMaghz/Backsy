@@ -1,0 +1,73 @@
+# ===================================================================
+#                      BACKUP TOOL CONFIGURATION
+# ===================================================================
+
+# -------------------------------------------------------------------
+# TARGETS: Define what to back up and from where.
+# -------------------------------------------------------------------
+targets:
+  Main_Server:
+    type: local
+
+    paths:
+      - "/etc/opt/marzneshin"
+      - "/var/lib/marznode"
+      - "/var/lib/marzneshin"
+      - "/etc/nginx/sites-available/marzneshin"
+    exclude:
+      - "mysql"
+      - "geofiles"
+      - "xray"
+      - "sing-box"
+      - "hysteria"
+
+    database:
+      enable: true
+      type: mariadb # or mysql, postgresql
+      container: marzneshin-db-1
+      name: marzneshin
+      user: root
+      password: ${LOCAL_DB_PASSWORD}
+
+  Node_Server:
+    type: remote
+    host: "1.1.1.1" # IP address (IPv4/IPv6) or hostname.
+    port: 2223
+    user: ubuntu
+    
+    auth:
+      method: key # 'key' or 'password'
+      key_path: "/root/.ssh/backup-key"
+      # password: ${REMOTE_SERVER_PASSWORD} # Use for password auth (less secure).
+
+    paths:
+      - "/opt/marzban"
+      - "/var/lib/marzban"
+      - "/etc/haproxy/haproxy.cfg"
+    exclude:
+      - "mysql"
+      - "assets"
+      - "xray"
+      - "logs"
+
+    database:
+      enable: true
+      type: mysql
+      container: marzban-mysql-1
+      name: marzban
+      user: root
+      password: ${REMOTE_DB_PASSWORD}
+
+# -------------------------------------------------------------------
+# SERVICES: Define where to send the final backup archives.
+# -------------------------------------------------------------------
+services:
+  cloudflare:
+    enable: true
+    worker_url: https://your-backup-worker.your-domain.workers.dev
+    # api_token: ${CLOUDFLARE_API_TOKEN}
+      
+  telegram:
+    enable: true
+    token: "${TELEGRAM_TOKEN}"
+    chat_id: "${TELEGRAM_CHAT_ID}"
