@@ -80,7 +80,7 @@ class BackupManager:
         base_caption = (
             f"📦 *Backup Notification*\n\n"
             f"• *Target:* `{target_name}`\n"
-            f"• *Time:* `{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}`"
+            f"• *Time:* `{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}`\n"
             f"• *Archive:* `{archive_path.name}` ({total_size_mb:.2f} MB)\n"
             f"• *Archive SHA256:* `{archive_checksum}`\n"
         )
