@@ -5,11 +5,16 @@ import requests
 logger = logging.getLogger(__name__)
 
 def _send_to_telegram(message: str, token: str, chat_id: str):
+    topic_id = os.getenv("TELEGRAM_TOPIC_ID")
     payload = {
         'chat_id': chat_id,
         'text': f"‼️ *CRITICAL: Backup Script Failure*\n\n```\n{message}\n```",
         'parse_mode': 'Markdown'
     }
+
+    if topic_id:
+         payload['message_thread_id'] = topic_id
+
     api_url = f"https://api.telegram.org/bot{token}/sendMessage"
     try:
         response = requests.post(api_url, json=payload, timeout=10)

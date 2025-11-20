@@ -14,6 +14,7 @@ class TelegramDestination(BaseDestination):
         super().__init__('Telegram', config)
         self.token = self.config['token']
         self.chat_id = self.config['chat_id']
+        self.topic_id = self.config.get('topic_id')
         self.max_size_mb = 50
 
     @retry(max_retries=3, delay=5, backoff=2)
@@ -50,6 +51,8 @@ class TelegramDestination(BaseDestination):
                 with open(part_path, 'rb') as f:
                     files = {'document': (part_path.name, f)}
                     data = {'chat_id': self.chat_id, 'caption': part_caption, 'parse_mode': 'Markdown'}
+                    if self.topic_id:
+                        data['message_thread_id'] = self.topic_id
                     response = requests.post(api_url, data=data, files=files, timeout=300)
                     response.raise_for_status()
 
