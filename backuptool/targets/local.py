@@ -12,7 +12,6 @@ def _is_tool_available(name: str) -> bool:
     return shutil.which(name) is not None
 
 class LocalTarget(BaseTarget):
-
     def _backup_database(self, db_config: dict, target_dir: Path) -> bool:
         if not db_config.get('enable', False):
             return True
@@ -21,6 +20,7 @@ class LocalTarget(BaseTarget):
         container = db_config['container']
         db_name = db_config['name']
         db_pass = db_config.get('password')
+        db_user = db_config.get('user')
 
         logger.info(f"Starting local Docker DB backup for '{db_name}' from container '{container}'...")
         try:
@@ -29,7 +29,7 @@ class LocalTarget(BaseTarget):
                 backup_file = target_dir / f"{db_name}_backup.sql"
                 cmd = [
                     'docker', 'exec', '-i', '-e', f"MYSQL_PWD={db_pass}", container,
-                    dump_tool, f"--user={db_config['user']}", '--single-transaction',
+                    dump_tool, f"--user={db_user}", '--single-transaction',
                     '--routines', '--triggers', db_name
                 ]
                 with open(backup_file, 'w', encoding='utf-8') as f:
@@ -40,7 +40,7 @@ class LocalTarget(BaseTarget):
                 final_backup_file = target_dir / f"{db_name}_backup.pgdump"
                 dump_cmd = [
                     'docker', 'exec', '-e', f"PGPASSWORD={db_pass}", container,
-                    'pg_dump', f"-U{db_config['user']}", f"-d{db_name}",
+                    'pg_dump', f"-U{db_user}", f"-d{db_name}",
                     '--format=c', f"--file={temp_backup_path}"
                 ]
                 copy_cmd = ['docker', 'cp', f"{container}:{temp_backup_path}", str(final_backup_file)]
@@ -69,16 +69,33 @@ class LocalTarget(BaseTarget):
                 return None
 
             logger.info(f"Syncing local paths for target '{self.name}'...")
-            rsync_cmd = ['rsync', '-a']
-            for ex in self.config.get('exclude', []):
-                rsync_cmd.append(f"--exclude={ex}")
             
-            for path_str in self.config.get('paths', []):
-                source_path = Path(path_str)
-                if source_path.exists():
-                    subprocess.run(rsync_cmd + [str(source_path), str(target_tmp_dir)], check=True)
+            for path_entry in self.config.get('paths', []):
+                if ':' in path_entry:
+                    src_path_str, alias = path_entry.split(':', 1)
+                    src_path = Path(src_path_str)
+                    
+                    dest_path = target_tmp_dir / alias
+                    dest_path.parent.mkdir(parents=True, exist_ok=True)
+                    
+                    rsync_cmd = ['rsync', '-a']
+                    for ex in self.config.get('exclude', []):
+                        rsync_cmd.append(f"--exclude={ex}")
+                    
+                    if src_path.exists():
+                        subprocess.run(rsync_cmd + [str(src_path), str(dest_path)], check=True)
+                    else:
+                        logger.warning(f"Local path not found: {src_path}")
                 else:
-                    logger.warning(f"Local path not found, skipping: {source_path}")
+                    src_path = Path(path_entry)
+                    if src_path.exists():
+                        rsync_cmd = ['rsync', '-aR']
+                        for ex in self.config.get('exclude', []):
+                            rsync_cmd.append(f"--exclude={ex}")
+                        
+                        subprocess.run(rsync_cmd + [str(src_path), str(target_tmp_dir)], check=True)
+                    else:
+                        logger.warning(f"Local path not found: {src_path}")
 
             archive_name = f"{datetime.now(timezone.utc).strftime('%Y-%m-%d')}_{self.name}.tar.gz"
             archive_path = self.tmp_dir / archive_name
@@ -93,11 +110,9 @@ class LocalTarget(BaseTarget):
             else:
                 logger.info("Pigz not found. Falling back to standard gzip.")
                 command_list = [
-                    'tar',
-                    '-czf', str(archive_path),
+                    'tar', '-czf', str(archive_path),
                     transform_flag,
-                    '-C', str(target_tmp_dir),
-                    '.'
+                    '-C', str(target_tmp_dir), '.'
                 ]
                 subprocess.run(" ".join(command_list), shell=True, check=True, capture_output=True, text=True)
 

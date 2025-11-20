@@ -7,7 +7,6 @@ from fabric import Connection
 logger = logging.getLogger(__name__)
 
 class RemoteTarget(BaseTarget):
-
     def execute(self) -> Path | None:
         logger.info(f"Executing remote backup for target '{self.name}'...")
         
@@ -38,6 +37,7 @@ class RemoteTarget(BaseTarget):
                     db_name = db_config['name']
                     container = db_config['container']
                     db_pass = db_config.get('password')
+                    db_user = db_config.get('user')
                     
                     dump_filename = f"db_dump_{db_name}.sql"
                     if db_type == 'postgresql':
@@ -49,17 +49,24 @@ class RemoteTarget(BaseTarget):
                     if db_type in ['mysql', 'mariadb']:
                         dump_tool = 'mariadb-dump' if db_type == 'mariadb' else 'mysqldump'
                         cmd = (f"docker exec -i -e MYSQL_PWD='{db_pass}' {container} {dump_tool} "
-                               f"--user={db_config['user']} --single-transaction --routines --triggers {db_name} > {remote_dump_path}")
+                               f"--user={db_user} --single-transaction --routines --triggers {db_name} > {remote_dump_path}")
                     elif db_type == 'postgresql':
                         cmd = (f"docker exec -i -e PGPASSWORD='{db_pass}' {container} pg_dump "
-                               f"-U {db_config['user']} -d {db_name} -Fc > {remote_dump_path}")
+                               f"-U {db_user} -d {db_name} -Fc > {remote_dump_path}")
                     
                     if cmd:
                         c.run(cmd, hide=True)
                         logger.info(f"Remote database dump created in staging directory: {dump_filename}")
 
-                for path in self.config.get('paths', []):
-                    c.run(f"rsync -aR {path} {remote_staging_dir}/", hide=True, warn=True)
+                for path_entry in self.config.get('paths', []):
+                    if ':' in path_entry:
+                        src_path, alias = path_entry.split(':', 1)
+                        dest_path = f"{remote_staging_dir}/{alias}"
+                        c.run(f"mkdir -p {dest_path}", hide=True)
+                        c.run(f"rsync -a {src_path} {dest_path}", hide=True, warn=True)
+                    else:
+                        src_path = path_entry
+                        c.run(f"rsync -aR {src_path} {remote_staging_dir}/", hide=True, warn=True)
 
                 archive_name = f"{datetime.now(timezone.utc).strftime('%Y-%m-%d')}_{self.name}.tar.gz"
                 remote_archive_path = f"/tmp/{archive_name}"
@@ -84,13 +91,6 @@ class RemoteTarget(BaseTarget):
                 size_result = c.run(f"stat -c %s {remote_archive_path}", hide=True)
                 remote_size_bytes = int(size_result.stdout.strip())
                 remote_size_mb = remote_size_bytes / (1024 * 1024)
-
-                if remote_size_mb > 100:
-                    logger.critical(
-                        f"Remote archive for target '{self.name}' is too large ({remote_size_mb:.2f} MB). "
-                        f"The maximum allowed size is 100 MB. Download will be skipped."
-                    )
-                    return None
 
                 local_archive_path = self.tmp_dir / archive_name
                 logger.info(f"Downloading archive ({remote_size_mb:.2f} MB) from {c.host}:{remote_archive_path}")
