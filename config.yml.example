@@ -9,14 +9,17 @@ targets:
   Main_Server:
     type: local
 
+    # Paths to include: (use ':' to rename, can be empty [])
     paths:
-      - "/etc/opt/marzneshin"
-      - "/var/lib/marznode"
-      - "/var/lib/marzneshin"
+      - "/etc/opt/marzneshin:data"
+      - "/var/lib/marznode:data"
+      - "/var/lib/marzneshin:data"
       - "/etc/nginx/sites-available/marzneshin"
+    
+    # Exclude items: names or patterns; these will NOT be backed up
     exclude:
       - "mysql"
-      - "geofiles"
+      - "*.dat"
       - "xray"
       - "sing-box"
       - "hysteria"
@@ -43,12 +46,12 @@ targets:
     paths:
       - "/opt/marzban"
       - "/var/lib/marzban"
-      - "/etc/haproxy/haproxy.cfg"
+      - "/etc/haproxy:config"
     exclude:
       - "mysql"
       - "assets"
       - "xray"
-      - "logs"
+      - "errors"
 
     database:
       enable: true
@@ -69,5 +72,6 @@ services:
       
   telegram:
     enable: true
-    token: "${TELEGRAM_TOKEN}"
-    chat_id: "${TELEGRAM_CHAT_ID}"
+    token: ${TELEGRAM_TOKEN}
+    chat_id: ${TELEGRAM_CHAT_ID}
+    topic_id: ${TELEGRAM_TOPIC_ID}
