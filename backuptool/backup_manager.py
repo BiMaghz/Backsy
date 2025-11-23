@@ -13,6 +13,8 @@ from backuptool.destinations.cloudflare import CloudflareDestination
 from backuptool.destinations.telegram import TelegramDestination
 from backuptool.destinations.s3 import S3Destination
 
+from backuptool.core.crypto import encrypt_file
+
 from backuptool.utils.helpers import calculate_checksum
 
 logger = logging.getLogger(__name__)
@@ -121,6 +123,10 @@ class BackupManager:
             logger.warning("No targets configured in 'config.yml'. Exiting.")
             return
 
+        encryption_pass = os.getenv("BACKUP_ENCRYPTION_PASSWORD")
+        if encryption_pass:
+            logger.info("🔒 Encryption is ENABLED. Archives will be encrypted with GPG.")
+
         logger.info(f"Processing {len(self.targets)} target(s) in parallel...")
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(self.targets)) as executor:
             future_to_target = {executor.submit(target.execute): target for target in self.targets}
@@ -130,13 +136,33 @@ class BackupManager:
                 logger.info(f"===== Processing result for Target: {target.name} =====")
                 try:
                     archive_path = future.result()
+                    
                     if archive_path and archive_path.exists():
-                        self._send_to_destinations(archive_path, target.name)
+                        final_path_to_send = archive_path
+                        
+                        if encryption_pass:
+                            encrypted_path = encrypt_file(archive_path, encryption_pass)
+                            if encrypted_path:
+                                try:
+                                    archive_path.unlink()
+                                    logger.info(f"Removed unencrypted file: {archive_path.name}")
+                                    final_path_to_send = encrypted_path
+                                except OSError as e:
+                                    logger.warning(f"Failed to remove unencrypted file: {e}")
+                            else:
+                                logger.error("Encryption failed! Aborting upload for safety.")
+                                try:
+                                    archive_path.unlink()
+                                except: pass
+                                continue 
+
+                        self._send_to_destinations(final_path_to_send, target.name)
+                        
                         try:
-                            archive_path.unlink()
-                            logger.info(f"Cleaned up temporary archive: {archive_path}")
+                            final_path_to_send.unlink()
+                            logger.info(f"Cleaned up temporary archive: {final_path_to_send}")
                         except OSError as e:
-                            logger.warning(f"Could not clean up archive {archive_path}: {e}")
+                            logger.warning(f"Could not clean up archive {final_path_to_send}: {e}")
                     else:
                         logger.error(f"Backup failed for target '{target.name}'. Skipping destinations.")
                 except Exception as exc:
