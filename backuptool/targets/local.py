@@ -97,7 +97,8 @@ class LocalTarget(BaseTarget):
                     else:
                         logger.warning(f"Local path not found: {src_path}")
 
-            archive_name = f"{datetime.now(timezone.utc).strftime('%Y-%m-%d')}_{self.name}.tar.gz"
+            timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d_%H-%M-%S')
+            archive_name = f"{timestamp}_{self.name}.tar.gz"
             archive_path = self.tmp_dir / archive_name
             
             root_folder_name = archive_name.replace(".tar.gz", "")

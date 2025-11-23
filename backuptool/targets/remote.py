@@ -67,8 +67,10 @@ class RemoteTarget(BaseTarget):
                     else:
                         src_path = path_entry
                         c.run(f"rsync -aR {src_path} {remote_staging_dir}/", hide=True, warn=True)
+                
+                timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d_%H-%M-%S')
+                archive_name = f"{timestamp}_{self.name}.tar.gz"
 
-                archive_name = f"{datetime.now(timezone.utc).strftime('%Y-%m-%d')}_{self.name}.tar.gz"
                 remote_archive_path = f"/tmp/{archive_name}"
                 remote_cleanup_paths.append(remote_archive_path)
 

@@ -11,6 +11,7 @@ from backuptool.targets.remote import RemoteTarget
 from backuptool.destinations.base import BaseDestination
 from backuptool.destinations.cloudflare import CloudflareDestination
 from backuptool.destinations.telegram import TelegramDestination
+from backuptool.destinations.s3 import S3Destination
 
 from backuptool.utils.helpers import calculate_checksum
 
@@ -46,6 +47,7 @@ class BackupManager:
         dest_map = {
             'cloudflare': CloudflareDestination,
             'telegram': TelegramDestination,
+            's3': S3Destination,
         }
         for name, config in self.services_config.items():
             if config.get('enable'):
