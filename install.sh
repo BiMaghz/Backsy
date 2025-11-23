@@ -347,6 +347,31 @@ configure_services() {
     else
         yq eval -i '.services.cloudflare.enable = false' "$CONFIG_FILE"
     fi
+
+    # S3
+    read -r -p "Enable S3 Storage (Arvan/R2/MinIO)? (y/n) [n]: " s3_q
+    if [[ "${s3_q,,}" == "y" ]]; then
+        read -r -p "Endpoint URL (e.g. https://s3.ir-thr-at1.arvanstorage.ir): " s3_url
+        read -r -p "Bucket Name: " s3_bucket
+        read -r -p "Region Name (optional, press Enter): " s3_region
+        
+        read -rs -p "Access Key: " s3_access; echo
+        read -rs -p "Secret Key: " s3_secret; echo
+        
+        _add_secret "S3_ACCESS_KEY" "$s3_access"
+        _add_secret "S3_SECRET_KEY" "$s3_secret"
+        
+        yq eval -i '.services.s3.enable = true' "$CONFIG_FILE"
+        yq eval -i ".services.s3.endpoint_url = \"$s3_url\"" "$CONFIG_FILE"
+        yq eval -i ".services.s3.bucket_name = \"$s3_bucket\"" "$CONFIG_FILE"
+        if [ -n "$s3_region" ]; then
+            yq eval -i ".services.s3.region_name = \"$s3_region\"" "$CONFIG_FILE"
+        fi
+        yq eval -i '.services.s3.access_key = "${S3_ACCESS_KEY}"' "$CONFIG_FILE"
+        yq eval -i '.services.s3.secret_key = "${S3_SECRET_KEY}"' "$CONFIG_FILE"
+    else
+        yq eval -i '.services.s3.enable = false' "$CONFIG_FILE"
+    fi
 }
 
 generate_runner() {
