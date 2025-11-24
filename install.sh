@@ -68,20 +68,25 @@ check_dependencies() {
     local missing=()
     local pkg_manager=""
     local cron_pkg=""
-
+    local gpg_pkg=""
+    
     # Detect package manager
     if command -v apt-get &>/dev/null; then
         pkg_manager="apt"
         cron_pkg="cron"
+        gpg_pkg="gnupg"
     elif command -v dnf &>/dev/null; then
         pkg_manager="dnf"
         cron_pkg="cronie"
+        gpg_pkg="gnupg2"
     elif command -v yum &>/dev/null; then
         pkg_manager="yum"
         cron_pkg="cronie"
+        gpg_pkg="gnupg2"
     elif command -v pacman &>/dev/null; then
         pkg_manager="pacman"
         cron_pkg="cronie"
+        gpg_pkg="gnupg"
     fi
 
     # Check standard binaries
@@ -102,6 +107,11 @@ check_dependencies() {
     # Check Cron
     if ! command -v crontab &>/dev/null && [[ -n "$cron_pkg" ]]; then
         missing+=("$cron_pkg")
+    fi
+
+    # Check GPG
+    if ! command -v gpg &>/dev/null && [[ -n "$gpg_pkg" ]]; then
+        missing+=("$gpg_pkg")
     fi
 
     # Install missing packages
@@ -292,7 +302,7 @@ Notes:
     print_success "Target Configured."
 }
 
-configure_services() {
+configure_services_and_secrets() {
     print_header "Services Configuration"
     _init_config
 
@@ -372,6 +382,25 @@ configure_services() {
     else
         yq eval -i '.services.s3.enable = false' "$CONFIG_FILE"
     fi
+
+    # Encryption Setup
+    print_header "Security & Encryption"
+    read -r -p "Encrypt backups with GPG? (Recommended) (y/n) [y]: " do_enc
+    
+    if [[ "${do_enc:-y}" == "y" ]]; then
+        while true; do
+            read -rs -p "Enter Encryption Password: " enc_pass; echo
+            read -rs -p "Confirm Password: " enc_pass2; echo
+
+            if [[ -n "$enc_pass" && "$enc_pass" == "$enc_pass2" ]]; then
+                _add_secret "BACKUP_ENCRYPTION_PASSWORD" "$enc_pass"
+                print_success "Encryption enabled."
+                break
+            else
+                print_error "Passwords do not match or are empty. Try again."
+            fi
+            done
+        fi
 }
 
 generate_runner() {
@@ -445,7 +474,7 @@ install_backsy() {
         configure_target "$tname"
     done
 
-    configure_services
+    configure_services_and_secrets
     generate_runner
     setup_cron
     print_success "Installation Complete!"
