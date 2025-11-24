@@ -1,4 +1,6 @@
 import requests
+import socket
+import urllib3.util.connection as urllib3_cn
 from pathlib import Path
 from backuptool.destinations.base import BaseDestination
 from backuptool.utils.helpers import retry, split_file, cleanup_files
@@ -16,6 +18,45 @@ class TelegramDestination(BaseDestination):
         self.chat_id = self.config['chat_id']
         self.topic_id = self.config.get('topic_id')
         self.max_size_mb = 50
+        self._configure_network_stack()
+
+    def _configure_network_stack(self):
+        """
+        Checks connectivity to Telegram via IPv6.
+        If it fails or times out (5s), forces IPv4 to avoid long delays.
+        """
+        host = "api.telegram.org"
+        port = 443
+        timeout = 5
+
+        self.logger.info(f"Testing network connectivity to {host}...")
+        
+        ipv6_working = False
+        try:
+            addr_info = socket.getaddrinfo(host, port, socket.AF_INET6, socket.SOCK_STREAM)
+            
+            if addr_info:
+                family, socktype, proto, canonname, sockaddr = addr_info[0]
+                
+                with socket.socket(family, socktype, proto) as sock:
+                    sock.settimeout(timeout)
+                    sock.connect(sockaddr)
+                
+                ipv6_working = True
+        except (socket.gaierror, socket.timeout, OSError) as e:
+            # self.logger.debug(f"IPv6 check failed details: {e}")
+            pass 
+
+        if not ipv6_working:
+            self.logger.warning(f"IPv6 to {host} failed or timed out. Forcing IPv4 to improve speed.")
+            self._force_ipv4()
+        else:
+            self.logger.info("IPv6 is healthy. Using default network settings.")
+
+    def _force_ipv4(self):
+        def allowed_gai_family():
+            return socket.AF_INET
+        urllib3_cn.allowed_gai_family = allowed_gai_family
 
     @retry(max_retries=3, delay=5, backoff=2)
     def send(self, archive_path: Path, base_caption: str, cloudflare_info: str = "") -> bool:
@@ -53,7 +94,7 @@ class TelegramDestination(BaseDestination):
                     data = {'chat_id': self.chat_id, 'caption': part_caption, 'parse_mode': 'Markdown'}
                     if self.topic_id:
                         data['message_thread_id'] = self.topic_id
-                    response = requests.post(api_url, data=data, files=files, timeout=300)
+                    response = requests.post(api_url, data=data, files=files, timeout=(10, 300))
                     response.raise_for_status()
 
             self.logger.info(f"Successfully sent all parts to {self.name}.")
