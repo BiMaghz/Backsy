@@ -1,9 +1,18 @@
 # Backsy
-a modular, lightweight Python backup tool for files and databases — local or remote via SSH — that can send backups to multiple destinations such as Cloudflare (temporary 24-hour download links), Telegram, or Discord. It supports database dumps (MySQL / MariaDB and PostgreSQL, including Dockerized instances), allows excluding files or paths, and uses fast synchronization and compression tools (e.g., rsync, pigz) and parallel processing for efficient, reliable backups.
+> Simple, Secure, and Automated Backup Solution.
+
+## Features
+
+| Category | Description |
+| :--- | :--- |
+| **Files** | Local or Remote Server (via SSH). Supports **custom include/exclude paths** to filter your data. |
+| **Databases** | **Dockerized** databases including **MySQL, MariaDB, and PostgreSQL**. |
+| **Destinations** | S3-compatible storage, Telegram, and Cloudflare Worker (**KV + 24-hour download links**). |
+| **Security** | Secured with **GPG encryption**. |
 
 ---
 
-### 🚀 Quick Start
+### Quick Start
 
 Run the following command as **root** to install and configure :
 
@@ -12,31 +21,20 @@ bash <(curl -fsSL https://raw.githubusercontent.com/BiMaghz/Backsy/main/install.
 ```
 After installation, you can run the same command again to access the management menu.
 
-### 🔧 Setting Up the Cloudflare Worker
+---
 
-To use the Cloudflare destination, you need to set up a free Cloudflare Worker and a KV namespace.
+### Configuration Guide
 
-1.  **Create the Worker:**
-    -   Log in to your Cloudflare dashboard.
-    -   Go to **Workers & Pages** -> **Create application** -> **Create Worker**.
-    -   Give your worker a name (e.g., `backsy-uploader`) and click **Deploy**.
+#### Cloudflare Worker
 
-2. **Add the Code:**
-   - Click **Edit code**.
-   - Delete the default "Hello World" code and paste the contents of the [worker.js](https://raw.githubusercontent.com/BiMaghz/Backsy/main/backuptool/cloudflare-worker/worker.js) file
-   - Click **Save and deploy**.
+1.  **Create Worker:** In Cloudflare Dashboard > **Workers & Pages**, create a new worker.
+2.  **Deploy Code:** Paste the contents of [worker.js](https://raw.githubusercontent.com/BiMaghz/Backsy/main/backuptool/cloudflare-worker/worker.js) and deploy.
+3.  **KV Namespace:** In Worker Settings > **Variables**, add a KV Namespace binding named `BACKUP_KV` (Create a new namespace if needed).
+4.  **API Token:** In Variables, add `API_TOKEN` with a strong password (click Encrypt). Use this same token during Backsy setup.
+5.  **Redeploy:** Go to the deployments tab and redeploy to apply changes.
 
-3.  **Create a KV Namespace:**
-    -   In your worker's settings, go to **Settings** -> **Variables**.
-    -   Scroll down to **KV Namespace Bindings** and click **Add binding**.
-    -   **Variable name:** `BACKUP_KV`
-    -   **KV namespace:** Click the dropdown and select **Create a new namespace**. Give it a name like `BacksyStorage`.
+#### S3 Storage (R2, ArvanCloud, AWS)
 
-4.  **Set the API Token (Optional but Recommended):**
-    -   Still in **Settings** -> **Variables**, scroll to **Environment Variables** and click **Add variable**.
-    -   **Variable name:** `API_TOKEN`
-    -   **Value:** Enter a strong, random password or token that you will use in your `run_backup.sh` file.
-    -   Click **Encrypt** to keep it secure.
-
-5.  **Deploy Again:**
-    -   Click **Save and deploy** one last time at the top of the page to apply the variable bindings. Your worker is now ready!
+* **Endpoint URL:** e.g., `https://s3.ir-thr-at1.arvanstorage.ir` or `https://<ACCOUNT_ID>.r2.cloudflarestorage.com`
+* **Credentials:** `Access Key` and `Secret Key`.
+* **Bucket Name:** The specific bucket you want to store backups in.
