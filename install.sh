@@ -339,6 +339,7 @@ configure_services_and_secrets() {
     fi
 
     # Cloudflare
+    print_info "Cloudflare Worker + KV: A lightweight solution for fast backup transfer."
     read -r -p "Enable Cloudflare? (y/n) [n]: " cf_q
     if [[ "${cf_q,,}" == "y" ]]; then
         read -r -p "Worker URL: " url
@@ -367,7 +368,15 @@ configure_services_and_secrets() {
         
         read -rs -p "Access Key: " s3_access; echo
         read -rs -p "Secret Key: " s3_secret; echo
-        
+
+        read -r -p "Generate S3 Download Links ((24h expiration))? (y/n) [y]: " s3_link_q
+        if [[ "${s3_link_q:-y}" == "y" ]]; then
+            yq eval -i '.services.s3.generate_link = true' "$CONFIG_FILE"
+            print_success "S3 Links Enabled and will be shown in Telegram if Cloudflare is disabled."
+        else
+            yq eval -i '.services.s3.generate_link = false' "$CONFIG_FILE"
+        fi
+
         _add_secret "S3_ACCESS_KEY" "$s3_access"
         _add_secret "S3_SECRET_KEY" "$s3_secret"
         
