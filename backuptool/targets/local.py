@@ -8,6 +8,9 @@ from .base import BaseTarget
 
 logger = logging.getLogger(__name__)
 
+THROTTLE_PREFIX = ["nice", "-n", "15", "ionice", "-c", "3"]
+THROTTLE_STR = "nice -n 15 ionice -c 3"
+
 def _is_tool_available(name: str) -> bool:
     return shutil.which(name) is not None
 
@@ -70,6 +73,10 @@ class LocalTarget(BaseTarget):
 
             logger.info(f"Syncing local paths for target '{self.name}'...")
             
+            rsync_base_cmd = THROTTLE_PREFIX + ['rsync', '-a']
+            for ex in self.config.get('exclude', []):
+                rsync_base_cmd.append(f"--exclude={ex}")
+            
             for path_entry in self.config.get('paths', []):
                 if ':' in path_entry:
                     src_path_str, alias = path_entry.split(':', 1)
@@ -78,22 +85,16 @@ class LocalTarget(BaseTarget):
                     dest_path = target_tmp_dir / alias
                     dest_path.parent.mkdir(parents=True, exist_ok=True)
                     
-                    rsync_cmd = ['rsync', '-a']
-                    for ex in self.config.get('exclude', []):
-                        rsync_cmd.append(f"--exclude={ex}")
-                    
                     if src_path.exists():
-                        subprocess.run(rsync_cmd + [str(src_path), str(dest_path)], check=True)
+                        subprocess.run(rsync_base_cmd + [str(src_path), str(dest_path)], check=True)
                     else:
                         logger.warning(f"Local path not found: {src_path}")
                 else:
                     src_path = Path(path_entry)
                     if src_path.exists():
-                        rsync_cmd = ['rsync', '-aR']
-                        for ex in self.config.get('exclude', []):
-                            rsync_cmd.append(f"--exclude={ex}")
-                        
-                        subprocess.run(rsync_cmd + [str(src_path), str(target_tmp_dir)], check=True)
+                        cmd_with_rel = list(rsync_base_cmd)
+                        cmd_with_rel.append('-R')
+                        subprocess.run(cmd_with_rel + [str(src_path), str(target_tmp_dir)], check=True)
                     else:
                         logger.warning(f"Local path not found: {src_path}")
 
@@ -106,16 +107,21 @@ class LocalTarget(BaseTarget):
             
             if _is_tool_available('pigz'):
                 logger.info("Using 'pigz' for fast, parallel compression.")
-                command_str = f"tar -cf - {transform_flag} -C {target_tmp_dir} . | pigz -9 > {archive_path}"
+                command_str = f"{THROTTLE_STR} tar -cf - {transform_flag} -C {target_tmp_dir} . | {THROTTLE_STR} pigz -9 > {archive_path}"
                 subprocess.run(command_str, shell=True, check=True, capture_output=True, text=True)
             else:
                 logger.info("Pigz not found. Falling back to standard gzip.")
-                command_list = [
+                command_list = THROTTLE_PREFIX + [
                     'tar', '-czf', str(archive_path),
                     transform_flag,
                     '-C', str(target_tmp_dir), '.'
                 ]
-                subprocess.run(" ".join(command_list), shell=True, check=True, capture_output=True, text=True)
+                # shell=True needed for transform quotes safety? Actually, list is safer if no pipe.
+                # But transform with list might have quote issues depending on implementation.
+                # Safest for transform is to construct string or ensure python passes it raw.
+                # Let's stick to string for consistency with the transform complexity.
+                cmd_str_fallback = f"{THROTTLE_STR} tar -czf {archive_path} {transform_flag} -C {target_tmp_dir} ."
+                subprocess.run(cmd_str_fallback, shell=True, check=True, capture_output=True, text=True)
 
             archive_size_mb = os.path.getsize(archive_path) / (1024 * 1024)
             logger.info(f"Local archive created successfully! Size: {archive_size_mb:.2f} MB")

@@ -1,6 +1,7 @@
 import logging
 import os
 import concurrent.futures
+import multiprocessing
 from pathlib import Path
 from datetime import datetime, timezone
 
@@ -127,8 +128,12 @@ class BackupManager:
         if encryption_pass:
             logger.info("🔒 Encryption is ENABLED. Archives will be encrypted with GPG.")
 
-        logger.info(f"Processing {len(self.targets)} target(s) in parallel...")
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(self.targets)) as executor:
+        cpu_count = multiprocessing.cpu_count()
+        max_concurrent_backups = max(1, min(2, cpu_count // 2))
+        
+        logger.info(f"Processing {len(self.targets)} target(s) with {max_concurrent_backups} concurrent worker(s)...")
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent_backups) as executor:
             future_to_target = {executor.submit(target.execute): target for target in self.targets}
             
             for future in concurrent.futures.as_completed(future_to_target):

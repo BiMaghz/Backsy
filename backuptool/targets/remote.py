@@ -6,7 +6,23 @@ from fabric import Connection
 
 logger = logging.getLogger(__name__)
 
+THROTTLE_CMD = "nice -n 15 ionice -c 3"
+
 class RemoteTarget(BaseTarget):
+    def _check_remote_space(self, connection, path: str, required_mb: int = 500) -> bool:
+        try:
+            result = connection.run(f"df -P -k {path} | tail -1", hide=True)
+            available_kb = int(result.stdout.split()[3])
+            available_mb = available_kb / 1024
+            
+            if available_mb < required_mb:
+                logger.error(f"Low remote disk space on '{path}': {available_mb:.2f}MB available, {required_mb}MB required.")
+                return False
+            return True
+        except Exception as e:
+            logger.warning(f"Could not check remote disk space on '{path}': {e}. Proceeding with caution.")
+            return True
+
     def execute(self) -> Path | None:
         logger.info(f"Executing remote backup for target '{self.name}'...")
         
@@ -26,7 +42,11 @@ class RemoteTarget(BaseTarget):
             ) as c:
                 logger.info(f"Successfully connected to {c.host}")
                 
-                remote_staging_dir = f"/tmp/backup_staging_{self.name}_{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+                if not self._check_remote_space(c, "/tmp", required_mb=500):
+                    return None
+
+                timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d_%H-%M-%S')
+                remote_staging_dir = f"/tmp/backup_staging_{self.name}_{timestamp}"
                 c.run(f"mkdir -p {remote_staging_dir}", hide=True)
                 remote_cleanup_paths.append(remote_staging_dir)
                 
@@ -38,7 +58,7 @@ class RemoteTarget(BaseTarget):
                     container = db_config['container']
                     db_pass = db_config.get('password')
                     db_user = db_config.get('user')
-                    
+
                     dump_filename = f"db_dump_{db_name}.sql"
                     if db_type == 'postgresql':
                         dump_filename = f"db_dump_{db_name}.pgdump"
@@ -63,12 +83,11 @@ class RemoteTarget(BaseTarget):
                         src_path, alias = path_entry.split(':', 1)
                         dest_path = f"{remote_staging_dir}/{alias}"
                         c.run(f"mkdir -p {dest_path}", hide=True)
-                        c.run(f"rsync -a {src_path} {dest_path}", hide=True, warn=True)
+                        c.run(f"{THROTTLE_CMD} rsync -a {src_path} {dest_path}", hide=True, warn=True)
                     else:
                         src_path = path_entry
-                        c.run(f"rsync -aR {src_path} {remote_staging_dir}/", hide=True, warn=True)
-                
-                timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d_%H-%M-%S')
+                        c.run(f"{THROTTLE_CMD} rsync -aR {src_path} {remote_staging_dir}/", hide=True, warn=True)
+
                 archive_name = f"{timestamp}_{self.name}.tar.gz"
 
                 remote_archive_path = f"/tmp/{archive_name}"
@@ -82,10 +101,10 @@ class RemoteTarget(BaseTarget):
                 use_pigz_remote = c.run("command -v pigz", hide=True, warn=True).ok
                 if use_pigz_remote:
                     logger.info("Using 'pigz' on remote server for compression.")
-                    tar_cmd = f"tar {exclude_str} {transform_flag} -cf - -C {remote_staging_dir} . | pigz -9 > {remote_archive_path}"
+                    tar_cmd = f"{THROTTLE_CMD} tar {exclude_str} {transform_flag} -cf - -C {remote_staging_dir} . | {THROTTLE_CMD} pigz -9 > {remote_archive_path}"
                 else:
                     logger.info("Pigz not found on remote. Using standard gzip.")
-                    tar_cmd = f"tar {exclude_str} {transform_flag} -czf {remote_archive_path} -C {remote_staging_dir} ."
+                    tar_cmd = f"{THROTTLE_CMD} tar {exclude_str} {transform_flag} -czf {remote_archive_path} -C {remote_staging_dir} ."
                 
                 logger.info("Running remote command to create archive.")
                 c.run(tar_cmd, hide=True)
