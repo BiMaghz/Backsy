@@ -1,4 +1,5 @@
 import logging
+import shlex
 from datetime import datetime, timezone
 from pathlib import Path
 from .base import BaseTarget
@@ -11,7 +12,8 @@ THROTTLE_CMD = "nice -n 15 ionice -c 3"
 class RemoteTarget(BaseTarget):
     def _check_remote_space(self, connection, path: str, required_mb: int = 500) -> bool:
         try:
-            result = connection.run(f"df -P -k {path} | tail -1", hide=True)
+            safe_path = shlex.quote(path)
+            result = connection.run(f"df -P -k {safe_path} | tail -1", hide=True)
             available_kb = int(result.stdout.split()[3])
             available_mb = available_kb / 1024
             
@@ -54,25 +56,28 @@ class RemoteTarget(BaseTarget):
                 if db_config.get('enable'):
                     logger.info("Remote Docker DB backup is enabled for this target.")
                     db_type = db_config.get('type', '').lower()
-                    db_name = db_config['name']
-                    container = db_config['container']
-                    db_pass = db_config.get('password')
-                    db_user = db_config.get('user')
-
-                    dump_filename = f"db_dump_{db_name}.sql"
+                    db_name = shlex.quote(db_config['name'])
+                    container = shlex.quote(db_config['container'])
+                    db_pass_safe = shlex.quote(db_config.get('password'))
+                    db_user_safe = shlex.quote(db_config.get('user'))
+                    
+                    dump_filename = f"db_dump_{db_config['name']}.sql"
                     if db_type == 'postgresql':
-                        dump_filename = f"db_dump_{db_name}.pgdump"
+                        dump_filename = f"db_dump_{db_config['name']}.pgdump"
                         
                     remote_dump_path = f"{remote_staging_dir}/{dump_filename}"
                     cmd = ""
                     
                     if db_type in ['mysql', 'mariadb']:
-                        dump_tool = 'mariadb-dump' if db_type == 'mariadb' else 'mysqldump'
-                        cmd = (f"docker exec -i -e MYSQL_PWD='{db_pass}' {container} {dump_tool} "
-                               f"--user={db_user} --single-transaction --routines --triggers {db_name} > {remote_dump_path}")
+                        cmd = (f"docker exec -i -e MYSQL_PWD={db_pass_safe} {container} mysqldump "
+                               f"--user={db_user_safe} --single-transaction --routines --triggers {db_name} > {remote_dump_path}")
+                        tool = 'mariadb-dump' if db_type == 'mariadb' else 'mysqldump'
+                        cmd = (f"docker exec -i -e MYSQL_PWD={db_pass_safe} {container} {tool} "
+                               f"--user={db_user_safe} --single-transaction --routines --triggers {db_name} > {remote_dump_path}")
+
                     elif db_type == 'postgresql':
-                        cmd = (f"docker exec -i -e PGPASSWORD='{db_pass}' {container} pg_dump "
-                               f"-U {db_user} -d {db_name} -Fc > {remote_dump_path}")
+                        cmd = (f"docker exec -i -e PGPASSWORD={db_pass_safe} {container} pg_dump "
+                               f"-U {db_user_safe} -d {db_name} -Fc > {remote_dump_path}")
                     
                     if cmd:
                         c.run(cmd, hide=True)
@@ -80,23 +85,28 @@ class RemoteTarget(BaseTarget):
 
                 for path_entry in self.config.get('paths', []):
                     if ':' in path_entry:
-                        src_path, alias = path_entry.split(':', 1)
-                        dest_path = f"{remote_staging_dir}/{alias}"
+                        src_path_str, alias = path_entry.split(':', 1)
+                        src_safe = shlex.quote(src_path_str)
+                        alias_safe = shlex.quote(alias)
+                        
+                        dest_path = f"{remote_staging_dir}/{alias_safe}"
                         c.run(f"mkdir -p {dest_path}", hide=True)
-                        c.run(f"{THROTTLE_CMD} rsync -a {src_path} {dest_path}", hide=True, warn=True)
+                        c.run(f"{THROTTLE_CMD} rsync -a {src_safe} {dest_path}", hide=True, warn=True)
                     else:
-                        src_path = path_entry
-                        c.run(f"{THROTTLE_CMD} rsync -aR {src_path} {remote_staging_dir}/", hide=True, warn=True)
+                        src_safe = shlex.quote(path_entry)
+                        c.run(f"{THROTTLE_CMD} rsync -aR {src_safe} {remote_staging_dir}/", hide=True, warn=True)
 
                 archive_name = f"{timestamp}_{self.name}.tar.gz"
-
                 remote_archive_path = f"/tmp/{archive_name}"
                 remote_cleanup_paths.append(remote_archive_path)
 
                 root_folder_name = archive_name.replace(".tar.gz", "")
                 transform_flag = f"--transform='s,^.,{root_folder_name},S'"
 
-                exclude_str = " ".join([f"--exclude='{ex}'" for ex in self.config.get('exclude', [])])
+                exclude_list = []
+                for ex in self.config.get('exclude', []):
+                    exclude_list.append(f"--exclude={shlex.quote(ex)}")
+                exclude_str = " ".join(exclude_list)
 
                 use_pigz_remote = c.run("command -v pigz", hide=True, warn=True).ok
                 if use_pigz_remote:
@@ -131,4 +141,4 @@ class RemoteTarget(BaseTarget):
                     port=self.config.get('port', 22), connect_kwargs=connect_kwargs
                 ) as c:
                     for f_path in remote_cleanup_paths:
-                        c.run(f"rm -rf {f_path}", hide=True, warn=True)
+                        c.run(f"rm -rf {shlex.quote(f_path)}", hide=True, warn=True)
