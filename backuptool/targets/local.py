@@ -56,8 +56,21 @@ class LocalTarget(BaseTarget):
             logger.info(f"Local Docker DB backup for '{db_name}' completed successfully.")
             return True
         except (subprocess.CalledProcessError, FileNotFoundError) as e:
-            error = e.stderr.decode().strip() if hasattr(e, 'stderr') else str(e)
-            logger.error(f"Failed to dump local Docker database: {error}")
+            error_msg = "Unknown error"
+            if hasattr(e, 'stderr') and e.stderr:
+                if isinstance(e.stderr, bytes):
+                    error_msg = e.stderr.decode().strip()
+                else:
+                    error_msg = e.stderr.strip()
+            elif hasattr(e, 'output') and e.output:
+                 if isinstance(e.output, bytes):
+                    error_msg = e.output.decode().strip()
+                 else:
+                    error_msg = e.output.strip()
+            else:
+                error_msg = str(e)
+
+            logger.error(f"Failed to dump local Docker database: {error_msg}")
             return False
 
     def execute(self) -> Path | None:
