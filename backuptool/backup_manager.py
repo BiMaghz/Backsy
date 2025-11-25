@@ -90,12 +90,21 @@ class BackupManager:
             f"• *Archive SHA256:* `{archive_checksum}`\n"
         )
         
-        cloudflare_caption_update = ""
+        link_caption_update = ""
+
         if 'cloudflare' in self.destinations:
             logger.info("--- Processing Cloudflare destination sequentially ---")
             result = self.destinations['cloudflare'].send(archive_path, base_caption)
             if isinstance(result, str):
-                cloudflare_caption_update = result
+                link_caption_update = result
+        
+        elif 's3' in self.destinations:
+            s3_dest = self.destinations['s3']
+            if not link_caption_update:
+                url = s3_dest.get_presigned_url(archive_path.name)
+                if url:
+                    link_caption_update = f"\n• [S3 Direct Link]({url})"
+                    logger.info("Generated S3 pre-signed URL for caption.")
         
         other_destinations = {n: d for n, d in self.destinations.items() if n != 'cloudflare'}
 
@@ -103,7 +112,7 @@ class BackupManager:
             logger.info(f"--- Processing remaining destinations in parallel: {list(other_destinations.keys())} ---")
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(other_destinations)) as executor:
                 future_to_dest = {
-                    executor.submit(dest.send, archive_path, base_caption, cloudflare_caption_update): name 
+                    executor.submit(dest.send, archive_path, base_caption, link_caption_update): name 
                     for name, dest in other_destinations.items()
                 }
                 for future in concurrent.futures.as_completed(future_to_dest):
