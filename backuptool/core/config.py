@@ -74,6 +74,7 @@ class S3Config(BaseModel):
     access_key: Optional[str] = None
     secret_key: Optional[str] = None
     region_name: Optional[str] = None
+    generate_link: bool  = False
 
 class ServicesConfig(BaseModel):
     cloudflare: Optional[CloudflareConfig] = Field(default_factory=lambda: CloudflareConfig(enable=False))
