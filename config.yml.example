@@ -75,6 +75,7 @@ services:
     token: ${TELEGRAM_TOKEN}
     chat_id: ${TELEGRAM_CHAT_ID}
     topic_id: ${TELEGRAM_TOPIC_ID}
+    send_file: false
 
   s3:
     enable: true
@@ -82,3 +83,7 @@ services:
     bucket_name: backups
     access_key: ${S3_ACCESS_KEY}
     secret_key: ${S3_SECRET_KEY}
+    generate_link: false
+
+monitoring:
+  healthcheck_url: https://hc-ping.com/uuid
