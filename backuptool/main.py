@@ -4,16 +4,18 @@ from backuptool.core.logger import setup_logging
 from backuptool.core.config import load_config
 from backuptool.backup_manager import BackupManager
 from backuptool.core.locking import FileLock, LockExistsError
+from backuptool.core.signals import GracefulKiller
 from backuptool.utils.notifications import send_fatal_alert
 
 def main():
     setup_logging()
+    killer = GracefulKiller()
     config = None
 
     try:
         with FileLock("/tmp/Backsy.lock", exit_on_lock=True):
             config = load_config()
-            manager = BackupManager(config)
+            manager = BackupManager(config, killer)
             manager.run()
             logging.info("Backup process completed successfully.")
 

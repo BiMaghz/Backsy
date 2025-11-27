@@ -16,14 +16,16 @@ from backuptool.destinations.telegram import TelegramDestination
 from backuptool.destinations.s3 import S3Destination
 
 from backuptool.core.crypto import encrypt_file
+from backuptool.core.signals import GracefulKiller
 
 from backuptool.utils.helpers import calculate_checksum
 
 logger = logging.getLogger(__name__)
 
 class BackupManager:
-    def __init__(self, config: dict):
+    def __init__(self, config: dict, killer: GracefulKiller):
         self.config = config
+        self.killer = killer
         self.tmp_dir = Path("/tmp/Backsy") # Or your preferred temp location like /dev/shm/Backsy
         self.targets_config = config.get('targets', {})
         self.services_config = config.get('services', {})
@@ -57,7 +59,7 @@ class BackupManager:
             if config.get('enable'):
                 logger.info(f"Initializing destination: {name}")
                 if name in dest_map:
-                    destinations[name] = dest_map[name](config)
+                    destinations[name] = dest_map[name](config, self.killer)
         return destinations
 
     def _check_disk_space(self, path: Path, required_mb: int = 200) -> bool:
@@ -147,6 +149,10 @@ class BackupManager:
             future_to_target = {executor.submit(target.execute): target for target in self.targets}
             
             for future in concurrent.futures.as_completed(future_to_target):
+                if self.killer.kill_now:
+                    logger.critical("Process interrupted by signal. Stopping manager loop.")
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    break
                 target = future_to_target[future]
                 logger.info(f"===== Processing result for Target: {target.name} =====")
                 try:
@@ -184,7 +190,7 @@ class BackupManager:
                     logger.error(f"Target '{target.name}' generated an exception during execution: {exc}", exc_info=True)
         
         logger.info("Backup process finished for all targets.")
-        
+
         hc_url = self.config.get('monitoring', {}).get('healthcheck_url')
         if hc_url:
             try:
