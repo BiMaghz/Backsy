@@ -8,6 +8,7 @@
 | **Files** | Local or Remote Server (via SSH). Supports **custom include/exclude paths** to filter your data. |
 | **Databases** | **Dockerized** databases including **MySQL, MariaDB, and PostgreSQL**. |
 | **Destinations** | S3-compatible storage, Telegram, Cloudflare KV or S3 pre-signed temporary download links (shown in Telegram captions). |
+| **Monitoring** | Integrated **Healthchecks** (pinging Healthchecks.io or Uptime Kuma) and **Notification Only** mode (send alerts/logs to Telegram without uploading files). |
 | **Security** | Secured with **GPG encryption**. |
 
 ---
