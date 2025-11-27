@@ -82,9 +82,13 @@ class ServicesConfig(BaseModel):
     telegram: Optional[TelegramConfig] = Field(default_factory=lambda: TelegramConfig(enable=False))
     s3: Optional[S3Config] = Field(default_factory=lambda: S3Config(enable=False))
 
+class MonitoringConfig(BaseModel):
+    healthcheck_url: Optional[str] = None
+
 class AppConfig(BaseModel):
     targets: Dict[str, TargetConfig]
     services: ServicesConfig
+    monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
 
 def _resolve_env_vars(config_data):
     if isinstance(config_data, dict):

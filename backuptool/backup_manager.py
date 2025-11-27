@@ -1,5 +1,6 @@
 import logging
 import os
+import requests
 import concurrent.futures
 import multiprocessing
 from pathlib import Path
@@ -183,3 +184,11 @@ class BackupManager:
                     logger.error(f"Target '{target.name}' generated an exception during execution: {exc}", exc_info=True)
         
         logger.info("Backup process finished for all targets.")
+        
+        hc_url = self.config.get('monitoring', {}).get('healthcheck_url')
+        if hc_url:
+            try:
+                requests.get(hc_url, timeout=10)
+                logger.info("Healthcheck ping sent successfully.")
+            except Exception as e:
+                logger.warning(f"Failed to send healthcheck ping: {e}")

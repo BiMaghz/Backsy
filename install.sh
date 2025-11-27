@@ -419,6 +419,23 @@ configure_services_and_secrets() {
         fi
 }
 
+configure_monitoring() {
+    print_header "Monitoring Configuration"
+    print_info "Integrate with Healthchecks.io, Uptime Kuma, or Better Stack."
+
+    while true; do
+        read -r -p "Enter Healthcheck URL: " hc_url
+
+        if [[ "$hc_url" =~ ^https?:// ]]; then
+            yq eval -i ".monitoring.healthcheck_url = \"$hc_url\"" "$CONFIG_FILE"
+            print_success "Healthcheck configured."
+            break
+        else
+            print_warning "Invalid URL format. Please enter a valid URL (starting with http:// or https://)"
+        fi
+    done
+}
+
 generate_runner() {
     print_header "Generating Runner"
     mkdir -p "$(dirname "$RUN_SCRIPT")"
@@ -491,6 +508,7 @@ install_backsy() {
     done
 
     configure_services_and_secrets
+    configure_monitoring
     generate_runner
     setup_cron
     print_success "Installation Complete!"
