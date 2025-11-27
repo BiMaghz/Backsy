@@ -61,8 +61,34 @@ class TelegramDestination(BaseDestination):
     @retry(max_retries=3, delay=5, backoff=2)
     def send(self, archive_path: Path, base_caption: str, cloudflare_info: str = "") -> bool:
         self.logger.info(f"Processing backup for {self.name}...")
+
+        should_send_file = self.config.get('send_file', True)
+        if not should_send_file:
+            self.logger.info("Configuration set to 'Notification Only'. Skipping file upload.")
+            full_caption = base_caption + cloudflare_info
+            
+            api_url = f"https://api.telegram.org/bot{self.token}/sendMessage"
+            data = {
+                'chat_id': self.chat_id,
+                'text': full_caption,
+                'parse_mode': 'Markdown',
+                'disable_web_page_preview': True
+            }
+            if self.topic_id:
+                data['message_thread_id'] = self.topic_id
+
+            kwargs = {'json': data, 'timeout': (10, 30)}
+
+            try:
+                response = requests.post(api_url, **kwargs)
+                response.raise_for_status()
+                self.logger.info("Notification sent successfully.")
+                return True
+            except requests.exceptions.RequestException as e:
+                self.logger.error(f"Error sending notification: {e}")
+                raise
+
         file_size_mb = archive_path.stat().st_size / (1024 * 1024)
-        
         files_to_send = []
         is_split = False
 

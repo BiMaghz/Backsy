@@ -66,6 +66,7 @@ class TelegramConfig(BaseModel):
     token: Optional[str] = None
     chat_id: Optional[str] = None
     topic_id: Optional[str] = None
+    send_file: bool = True
 
 class S3Config(BaseModel):
     enable: bool = False

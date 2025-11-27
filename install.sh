@@ -312,6 +312,13 @@ configure_services_and_secrets() {
         print_info "Format for Chat ID: 'YourID' OR 'YourID/TopicID' (e.g., -100123456/5)"
         read -r -p "Chat ID: " raw_cid
         read -rs -p "Bot Token: " tok; echo
+        read -r -p "Send actual backup files to Telegram? (If 'n', only text notification with links will be sent) (y/n) [y]: " send_file_q
+        if [[ "${send_file_q:-y}" == "n" ]]; then
+            yq eval -i '.services.telegram.send_file = false' "$CONFIG_FILE"
+            print_info "Telegram set to 'Notification Only' mode."
+        else
+            yq eval -i '.services.telegram.send_file = true' "$CONFIG_FILE"
+        fi
         
         local real_cid="$raw_cid"
         local topic_id=""
