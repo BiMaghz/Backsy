@@ -5,8 +5,8 @@ from .base import BaseDestination
 from backuptool.utils.helpers import retry
 
 class S3Destination(BaseDestination):
-    def __init__(self, config: dict):
-        super().__init__('S3', config)
+    def __init__(self, config: dict, killer=None):
+        super().__init__('S3', config, killer)
         self.endpoint_url = self.config.get('endpoint_url')
         self.access_key = self.config.get('access_key')
         self.secret_key = self.config.get('secret_key')
@@ -40,6 +40,9 @@ class S3Destination(BaseDestination):
 
     @retry(max_retries=3, delay=5, backoff=2)
     def send(self, archive_path: Path, base_caption: str, cloudflare_info: str = "") -> bool:
+        if self.killer and self.killer.kill_now:
+            self.logger.warning("S3 upload aborted by signal.")
+            return False
         self.logger.info(f"Processing backup for {self.name}...")
         file_size_mb = archive_path.stat().st_size / (1024 * 1024)
         object_name = archive_path.name

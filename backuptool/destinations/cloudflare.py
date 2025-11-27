@@ -5,8 +5,8 @@ from backuptool.utils.helpers import retry, split_file, cleanup_files
 from .base import BaseDestination
 
 class CloudflareDestination(BaseDestination):
-    def __init__(self, config: dict):
-        super().__init__('Cloudflare', config)
+    def __init__(self, config: dict, killer=None):
+        super().__init__('Cloudflare', config, killer)
         self.worker_url = self.config['worker_url']
         self.api_token = self.config.get('api_token')
         self.max_size_mb = 25
@@ -34,6 +34,11 @@ class CloudflareDestination(BaseDestination):
         try:
             total_parts = len(files_to_send)
             for i, part_path in enumerate(files_to_send):
+
+                if self.killer and self.killer.kill_now:
+                    self.logger.warning("Upload interrupted by signal. Aborting Cloudflare upload.")
+                    return False
+                
                 part_num = i + 1
                 self.logger.info(f"Uploading part {part_num}/{total_parts} to {self.name}...")
 

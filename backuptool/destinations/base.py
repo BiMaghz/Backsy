@@ -4,9 +4,10 @@ from pathlib import Path
 
 class BaseDestination(ABC):
 
-    def __init__(self, name: str, config: dict):
+    def __init__(self, name: str, config: dict, killer=None):
         self._name = name
         self.config = config
+        self.killer = killer
         self.logger = logging.getLogger(f"destination.{self.name}")
 
     @property

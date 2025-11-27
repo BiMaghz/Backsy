@@ -12,8 +12,8 @@ def _send_text_message(token, chat_id, caption):
     response.raise_for_status()
 
 class TelegramDestination(BaseDestination):
-    def __init__(self, config: dict):
-        super().__init__('Telegram', config)
+    def __init__(self, config: dict, killer=None):
+        super().__init__('Telegram', config, killer)
         self.token = self.config['token']
         self.chat_id = self.config['chat_id']
         self.topic_id = self.config.get('topic_id')
@@ -104,6 +104,11 @@ class TelegramDestination(BaseDestination):
         try:
             total_parts = len(files_to_send)
             for i, part_path in enumerate(files_to_send):
+
+                if self.killer and self.killer.kill_now:
+                    self.logger.warning("Upload interrupted by signal. Aborting Telegram upload.")
+                    return False
+                
                 part_num = i + 1
                 
                 if part_num == 1:
