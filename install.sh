@@ -48,6 +48,16 @@ _prepare_logs() {
     is_root && chmod 640 "$LOG_FILE" 2>/dev/null || true
 }
 
+_resolve_path() {
+    local path="$1"
+    if [[ "$path" == "~"* ]]; then
+        local user_home
+        user_home=$(getent passwd "${SUDO_USER:-$USER}" | cut -d: -f6)
+        path="${path/#\~/$user_home}"
+    fi
+    realpath -q "$path" || echo "$path"
+}
+
 # --- Secrets Management ---
 declare -a G_SECRET_VARS=()
 declare -A G_SECRET_VALUES=()
@@ -64,9 +74,9 @@ _add_secret() {
 check_dependencies() {
     print_header "Checking Dependencies"
 
-    local required=(git curl rsync)
+    local required=(git curl rsync sshpass)
     local missing=()
-    local pkg_manager=""
+    local pkg_manager=""    
     local cron_pkg=""
     local gpg_pkg=""
     
@@ -189,53 +199,138 @@ configure_target() {
     local name="${1:-$(hostname)}"
     _init_config
 
-    print_header "Target: $name"
+    print_header "Configuring Target: $name"
     export YQ_NAME="$name"
     yq eval -i ".targets[strenv(YQ_NAME)] = {}" "$CONFIG_FILE"
 
-    # Type
     echo "Select Type:"
+    PS3="Your choice > "
+    local target_type="local"
     select t in "local" "remote"; do
-        [ -n "$t" ] && { yq eval -i ".targets[strenv(YQ_NAME)].type = \"$t\"" "$CONFIG_FILE"; break; }
+        [ -n "$t" ] && { target_type="$t"; yq eval -i ".targets[strenv(YQ_NAME)].type = \"$t\"" "$CONFIG_FILE"; break; }
     done
 
-    # Paths
-    echo "
-Enter paths to include (comma-separated).
+    local -a REMOTE_CMD_ARR=()
 
-Examples:
-    /opt/simple-web, /var/www/html/config
-    /etc/ssh/:ssh_configs, /etc/nginx/:nginx_configs
+    if [ "$target_type" == "remote" ]; then
+        while true; do
+            print_info "Configuring Remote SSH Connection..."
+            read -r -p "Host: " host
+            read -r -p "User [root]: " user
+            read -r -p "Port [22]: " port
+            
+            export H="$host" U="${user:-root}" P="${port:-22}"
+            
+            yq eval -i ".targets[strenv(YQ_NAME)].host = strenv(H) | .targets[strenv(YQ_NAME)].host style=\"double\"" "$CONFIG_FILE"
+            yq eval -i ".targets[strenv(YQ_NAME)].user = strenv(U) | .targets[strenv(YQ_NAME)].user style=\"double\"" "$CONFIG_FILE"
+            yq eval -i ".targets[strenv(YQ_NAME)].port = (strenv(P) | tonumber)" "$CONFIG_FILE"
 
-Notes:
-    - Use ':' to rename a path inside the backup.
-    Format: actual_path:new_name
-    - You can enter multiple items separated by commas.
-    - Press Enter to skip.
-"
-    read -r -p "Paths : " p_in
-    yq eval -i ".targets[strenv(YQ_NAME)].paths = []" "$CONFIG_FILE"
-    if [ -n "$p_in" ]; then
-        IFS=',' read -r -a p_arr <<< "$p_in"
-        for p in "${p_arr[@]}"; do
-            export VAL=$(trim "$p")
-            [ -n "$VAL" ] && yq eval -i ".targets[strenv(YQ_NAME)].paths += [strenv(VAL)] | .targets[strenv(YQ_NAME)].paths[-1] style=\"double\"" "$CONFIG_FILE"
+            echo "Auth Method:"
+            local method="key"
+            select m in "key" "password"; do
+                [ -n "$m" ] && { method="$m"; yq eval -i ".targets[strenv(YQ_NAME)].auth.method = \"$m\"" "$CONFIG_FILE"; break; }
+            done
+
+            local kp=""
+            local pass_val=""
+
+            local -a ssh_base_opts=(
+                -o StrictHostKeyChecking=no 
+                -o UserKnownHostsFile=/dev/null 
+                -o ConnectTimeout=10 
+                -o LogLevel=ERROR
+                -p "$P"
+            )
+
+            REMOTE_CMD_ARR=()
+
+            if [ "$method" == "key" ]; then
+                read -e -p "Private Key Path: " raw_kp
+                kp=$(_resolve_path "$raw_kp")
+                
+                if [ ! -f "$kp" ]; then
+                    print_error "Key file not found at: $kp"
+                    continue
+                fi
+
+                export KP="$kp"
+                yq eval -i ".targets[strenv(YQ_NAME)].auth.key_path = strenv(KP) | .targets[strenv(YQ_NAME)].auth.key_path style=\"double\"" "$CONFIG_FILE"
+                
+                REMOTE_CMD_ARR=(ssh "${ssh_base_opts[@]}" -o BatchMode=yes -o IdentitiesOnly=yes -i "$kp" "$U@$H")
+
+            else
+                local vname="${name^^}_SSH_PASSWORD"
+                vname=${vname//[^A-Z0-9_]/_}
+                read -rs -p "SSH Password: " pass_val; echo
+                _add_secret "$vname" "$pass_val"
+                yq eval -i ".targets[strenv(YQ_NAME)].auth.password = \"\${$vname}\"" "$CONFIG_FILE"
+
+                if ! command -v sshpass &>/dev/null; then
+                    print_warning "'sshpass' is missing. Cannot verify connection automatically."
+                    break
+                fi
+                
+                REMOTE_CMD_ARR=(sshpass -p "$pass_val" ssh "${ssh_base_opts[@]}" "$U@$H")
+            fi
+
+            # --- Test Connection ---
+            print_info "Testing connection to $H..."
+
+            local test_output
+            if test_output=$("${REMOTE_CMD_ARR[@]}" "echo ConnectionSuccess" 2>&1); then
+                if [[ "$test_output" == *"ConnectionSuccess"* ]]; then
+                    print_success "Connection Established Successfully!"
+                    break
+                fi
+            fi
+
+            print_error "Connection Failed!"
+            print_warning "Error Details:"
+            echo -e "${C_RED}$test_output${C_RESET}"
+            echo "---------------------------------------------------"
         done
     fi
 
+    # Paths
+    print_info "Enter paths to backup one by one."
+    print_info "Press 'Enter' on an empty line to finish."
+    print_info "Tip: Use ':' to rename a path inside the backup."
+    
+    if [ "$target_type" == "remote" ]; then
+        print_info "Tip: Type 'explore' to open a temporary shell on the server to find paths."
+    fi
+
+    yq eval -i ".targets[strenv(YQ_NAME)].paths = []" "$CONFIG_FILE"
+    
+    while true; do
+        read -e -p "Add Path > " p_in
+        if [ -z "$p_in" ]; then break; fi
+        
+        # --- Explore Mode ---
+        if [[ "$p_in" == "explore" || "$p_in" == "sh" ]] && [ "$target_type" == "remote" ]; then
+             print_warning "Opening temporary shell on remote server..."
+             print_info "Navigate to find your path, copy it, then type 'exit' to return here."
+             
+             if [ "$method" == "key" ]; then
+                 ssh "${ssh_base_opts[@]}" -t -o BatchMode=yes -o IdentitiesOnly=yes -i "$kp" "$U@$H" bash || true
+             else
+                 sshpass -p "$pass_val" ssh "${ssh_base_opts[@]}" -t "$U@$H" bash || true
+             fi
+             
+             echo
+             print_success "Returned to setup."
+             continue
+        fi
+
+        export VAL=$(trim "$p_in")
+        yq eval -i ".targets[strenv(YQ_NAME)].paths += [strenv(VAL)] | .targets[strenv(YQ_NAME)].paths[-1] style=\"double\"" "$CONFIG_FILE"
+    done
+    
     # Excludes
-    echo "
-Enter items to exclude from the backup (comma-separated).
+    print_info "Enter items to exclude (comma-separated)."
+    print_info "Example: *.log, temp/, /var/cache"
 
-Examples:
-    mysql, xray, *.dat, logs, errors
-
-Notes:
-    - Use '*' for wildcard patterns.
-    - Folder or file names will be ignored if matched.
-    - Press Enter to skip.
-"
-    read -r -p "Excludes : " e_in
+    read -r -p "Excludes > " e_in
     yq eval -i ".targets[strenv(YQ_NAME)].exclude = []" "$CONFIG_FILE"
     if [ -n "$e_in" ]; then
         IFS=',' read -r -a e_arr <<< "$e_in"
@@ -245,54 +340,67 @@ Notes:
         done
     fi
 
-    # Remote Config
-    local t_type
-    t_type=$(yq eval ".targets[\"$name\"].type" "$CONFIG_FILE")
-    if [ "$t_type" == "remote" ]; then
-        read -r -p "Host: " host
-        read -r -p "User [root]: " user
-        read -r -p "Port [22]: " port
-        export H="$host" U="${user:-root}" P="${port:-22}"
-        
-        yq eval -i ".targets[strenv(YQ_NAME)].host = strenv(H) | .targets[strenv(YQ_NAME)].host style=\"double\"" "$CONFIG_FILE"
-        yq eval -i ".targets[strenv(YQ_NAME)].user = strenv(U) | .targets[strenv(YQ_NAME)].user style=\"double\"" "$CONFIG_FILE"
-        yq eval -i ".targets[strenv(YQ_NAME)].port = (strenv(P) | tonumber)" "$CONFIG_FILE"
-
-        echo "Auth Method:"
-        select method in "key" "password"; do
-            [ -n "$method" ] && { yq eval -i ".targets[strenv(YQ_NAME)].auth.method = \"$method\"" "$CONFIG_FILE"; break; }
-        done
-
-        if [ "$method" == "key" ]; then
-            read -r -p "Private Key Path: " kp
-            export KP="$kp"
-            yq eval -i ".targets[strenv(YQ_NAME)].auth.key_path = strenv(KP) | .targets[strenv(YQ_NAME)].auth.key_path style=\"double\"" "$CONFIG_FILE"
-        else
-            local vname="${name^^}_SSH_PASSWORD"
-            vname=${vname//[^A-Z0-9_]/_}
-            read -rs -p "SSH Password: " pass; echo
-            _add_secret "$vname" "$pass"
-            yq eval -i ".targets[strenv(YQ_NAME)].auth.password = \"\${$vname}\"" "$CONFIG_FILE"
-        fi
-    fi
-
     # Database Config
     read -r -p "Configure Database? (y/n) [n]: " db_q
     if [[ "${db_q,,}" == "y" ]]; then
         read -r -p "Type (mariadb/mysql/postgresql): " dtype
-        read -r -p "Container Name: " dcont
+        local dcont=""
+        local containers=()
+        
+        if [ "$target_type" == "remote" ]; then
+            if [ ${#REMOTE_CMD_ARR[@]} -gt 0 ]; then
+                echo "Fetching remote containers..."
+                local docker_out
+                if docker_out=$("${REMOTE_CMD_ARR[@]}" "docker ps --format '{{.Names}}'" 2>/dev/null); then
+                    if [ -n "$docker_out" ]; then
+                        mapfile -t containers <<< "$docker_out"
+                    else
+                         print_warning "No running containers found."
+                    fi
+                else
+                    print_warning "Failed to fetch containers (Docker might not be running/installed)."
+                fi
+            fi
+        elif command -v docker &>/dev/null; then
+             mapfile -t containers < <(docker ps --format "{{.Names}}")
+        fi
+
+        if [ ${#containers[@]} -gt 0 ]; then
+            echo "Select Database Source:"
+            PS3="Select Container (or Manual/Native): "
+            select opt in "${containers[@]}" "Manual Input" "Native (No Container)"; do
+                if [[ "$opt" == "Native (No Container)" ]]; then
+                    dcont=""
+                    break
+                elif [[ "$opt" == "Manual Input" ]]; then
+                        read -r -p "Enter Container Name: " dcont
+                        break
+                elif [[ -n "$opt" ]]; then
+                    dcont="$opt"
+                    break
+                else
+                    echo "Invalid selection."
+                fi
+            done
+        else
+            read -r -p "Container Name (Leave empty for Native/Localhost): " dcont
+        fi
+
         read -r -p "DB Name: " dname
         read -r -p "DB User: " duser
-        
         local vname="${name^^}_DB_PASSWORD"
         vname=${vname//[^A-Z0-9_]/_}
         read -rs -p "DB Password: " dpass; echo
         _add_secret "$vname" "$dpass"
-
+        
         export DT="$dtype" DC="$dcont" DN="$dname" DU="$duser" DP="\${$vname}"
         yq eval -i ".targets[strenv(YQ_NAME)].database.enable = true" "$CONFIG_FILE"
         yq eval -i ".targets[strenv(YQ_NAME)].database.type = strenv(DT)" "$CONFIG_FILE"
-        yq eval -i ".targets[strenv(YQ_NAME)].database.container = strenv(DC) | .targets[strenv(YQ_NAME)].database.container style=\"double\"" "$CONFIG_FILE"
+        if [ -n "$DC" ]; then
+            yq eval -i ".targets[strenv(YQ_NAME)].database.container = strenv(DC) | .targets[strenv(YQ_NAME)].database.container style=\"double\"" "$CONFIG_FILE"
+        else
+            yq eval -i "del(.targets[strenv(YQ_NAME)].database.container)" "$CONFIG_FILE"
+        fi
         yq eval -i ".targets[strenv(YQ_NAME)].database.name = strenv(DN) | .targets[strenv(YQ_NAME)].database.name style=\"double\"" "$CONFIG_FILE"
         yq eval -i ".targets[strenv(YQ_NAME)].database.user = strenv(DU) | .targets[strenv(YQ_NAME)].database.user style=\"double\"" "$CONFIG_FILE"
         yq eval -i ".targets[strenv(YQ_NAME)].database.password = strenv(DP)" "$CONFIG_FILE"
@@ -349,8 +457,17 @@ configure_services_and_secrets() {
     print_info "Cloudflare Worker + KV: A lightweight solution for fast backup transfer."
     read -r -p "Enable Cloudflare? (y/n) [n]: " cf_q
     if [[ "${cf_q,,}" == "y" ]]; then
-        read -r -p "Worker URL: " url
-        read -rs -p "API Token: (Enter to skip.)" tok; echo
+        
+        while true; do
+            read -r -p "Worker URL: " url
+            if [[ "$url" =~ ^https?:// ]]; then
+                break
+            else
+                print_warning "Invalid URL. Please start with http:// or https://"
+            fi
+        done
+
+        read -rs -p "API Token (Enter to skip): " tok; echo
         export URL="$url"
         
         yq eval -i '.services.cloudflare.enable = true' "$CONFIG_FILE"
@@ -369,7 +486,16 @@ configure_services_and_secrets() {
     # S3
     read -r -p "Enable S3 Storage (Arvan/R2/MinIO)? (y/n) [n]: " s3_q
     if [[ "${s3_q,,}" == "y" ]]; then
-        read -r -p "Endpoint URL (e.g. https://s3.ir-thr-at1.arvanstorage.ir): " s3_url
+        
+        while true; do
+            read -r -p "Endpoint URL (e.g. https://s3.ir-thr-at1.arvanstorage.ir): " s3_url
+            if [[ "$s3_url" =~ ^https?:// ]]; then
+                break
+            else
+                print_warning "Invalid URL. Please start with http:// or https://"
+            fi
+        done
+
         read -r -p "Bucket Name: " s3_bucket
         read -r -p "Region Name (optional, press Enter): " s3_region
         
@@ -388,7 +514,7 @@ configure_services_and_secrets() {
         _add_secret "S3_SECRET_KEY" "$s3_secret"
         
         yq eval -i '.services.s3.enable = true' "$CONFIG_FILE"
-        yq eval -i ".services.s3.endpoint_url = \"$s3_url\"" "$CONFIG_FILE"
+        yq eval -i ".services.s3.endpoint_url = \"$s3_url\" | .services.s3.endpoint_url style=\"double\"" "$CONFIG_FILE"
         yq eval -i ".services.s3.bucket_name = \"$s3_bucket\"" "$CONFIG_FILE"
         if [ -n "$s3_region" ]; then
             yq eval -i ".services.s3.region_name = \"$s3_region\"" "$CONFIG_FILE"
@@ -424,10 +550,15 @@ configure_monitoring() {
     print_info "Integrate with Healthchecks.io, Uptime Kuma, or Better Stack."
 
     while true; do
-        read -r -p "Enter Healthcheck URL: " hc_url
+        read -r -p "Enter Healthcheck URL (Enter to skip): " hc_url
+
+        if [[ -z "$hc_url" ]]; then
+            print_warning "Skipped Healthcheck configuration."
+            break
+        fi
 
         if [[ "$hc_url" =~ ^https?:// ]]; then
-            yq eval -i ".monitoring.healthcheck_url = \"$hc_url\"" "$CONFIG_FILE"
+            yq eval -i ".monitoring.healthcheck_url = \"$hc_url\" | .monitoring.healthcheck_url style=\"double\"" "$CONFIG_FILE"
             print_success "Healthcheck configured."
             break
         else
