@@ -1,5 +1,6 @@
 import boto3
 from botocore.exceptions import ClientError
+from botocore.config import Config
 from pathlib import Path
 from .base import BaseDestination
 from backuptool.utils.helpers import retry
@@ -15,12 +16,18 @@ class S3Destination(BaseDestination):
         self.generate_link = self.config.get('generate_link', False)
         self.link_expiration = 86400
 
+        s3_config = Config(
+            signature_version='s3v4',
+            retries={'max_attempts': 3}
+        )
+
         self.s3_client = boto3.client(
             's3',
             endpoint_url=self.endpoint_url,
             aws_access_key_id=self.access_key,
             aws_secret_access_key=self.secret_key,
-            region_name=self.region_name
+            region_name=self.region_name,
+            config=s3_config
         )
 
     def get_presigned_url(self, filename: str) -> str | None:
@@ -55,7 +62,8 @@ class S3Destination(BaseDestination):
                 self.bucket_name,
                 object_name
             )
-            self.logger.info(f"Successfully uploaded to S3: {self.endpoint_url}/{self.bucket_name}/{object_name}")
+            log_msg = f"Successfully uploaded to S3: {self.bucket_name}/{object_name}"
+            self.logger.info(log_msg)
             return True
 
         except ClientError as e:
