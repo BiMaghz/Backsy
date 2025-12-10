@@ -185,6 +185,44 @@ check_dependencies() {
     print_success "All dependencies are installed and ready."
 }
 
+ensure_db_client() {
+    local type=$1
+    
+    if [ "$target_type" == "local" ]; then
+        if [[ "$type" == "mariadb" ]] || [[ "$type" == "mysql" ]]; then
+            if ! command -v mariadb-dump &>/dev/null && ! command -v mysqldump &>/dev/null; then
+                print_warning "MariaDB/MySQL client tools not found. Installing..."
+                if command -v apt-get &>/dev/null; then
+                    apt-get update -qq && apt-get install -y mariadb-client
+                elif command -v dnf &>/dev/null; then
+                    dnf install -y mariadb
+                elif command -v yum &>/dev/null; then
+                    yum install -y mariadb
+                elif command -v pacman &>/dev/null; then
+                    pacman -S --noconfirm mariadb
+                else
+                    print_error "Could not install database client automatically. Please install 'mariadb-client' manually."
+                fi
+            fi
+        elif [[ "$type" == "postgresql" ]]; then
+            if ! command -v pg_dump &>/dev/null; then
+                print_warning "PostgreSQL client tools not found. Installing..."
+                if command -v apt-get &>/dev/null; then
+                    apt-get update -qq && apt-get install -y postgresql-client
+                elif command -v dnf &>/dev/null; then
+                    dnf install -y postgresql
+                elif command -v pacman &>/dev/null; then
+                    pacman -S --noconfirm postgresql-libs
+                else
+                    print_error "Could not install database client automatically. Please install 'postgresql-client' manually."
+                fi
+            fi
+        fi
+    else
+        print_info "Note: For remote native backups, ensure database clients (mysqldump/pg_dump) are installed on the remote server."
+    fi
+}
+
 # --- Configuration Logic ---
 _init_config() {
     if [ ! -f "$CONFIG_FILE" ]; then
@@ -343,22 +381,31 @@ configure_target() {
     # Database Config
     read -r -p "Configure Database? (y/n) [n]: " db_q
     if [[ "${db_q,,}" == "y" ]]; then
-        read -r -p "Type (mariadb/mysql/postgresql): " dtype
+        while true; do
+            read -r -p "Type (mariadb/mysql/postgresql): " dtype
+            dtype=${dtype,,}
+            if [[ "$dtype" == "mariadb" || "$dtype" == "mysql" || "$dtype" == "postgresql" ]]; then
+                break
+            else
+                print_error "Invalid type. Please enter mariadb, mysql, or postgresql."
+            fi
+        done
+
         local dcont=""
+        local dhost=""
+        local dport=""
         local containers=()
         
         if [ "$target_type" == "remote" ]; then
             if [ ${#REMOTE_CMD_ARR[@]} -gt 0 ]; then
-                echo "Fetching remote containers..."
+                print_info "Fetching remote containers..."
                 local docker_out
                 if docker_out=$("${REMOTE_CMD_ARR[@]}" "docker ps --format '{{.Names}}'" 2>/dev/null); then
                     if [ -n "$docker_out" ]; then
                         mapfile -t containers <<< "$docker_out"
                     else
-                         print_warning "No running containers found."
+                        print_warning "No running containers found on remote."
                     fi
-                else
-                    print_warning "Failed to fetch containers (Docker might not be running/installed)."
                 fi
             fi
         elif command -v docker &>/dev/null; then
@@ -373,8 +420,8 @@ configure_target() {
                     dcont=""
                     break
                 elif [[ "$opt" == "Manual Input" ]]; then
-                        read -r -p "Enter Container Name: " dcont
-                        break
+                    read -r -p "Enter Container Name: " dcont
+                    break
                 elif [[ -n "$opt" ]]; then
                     dcont="$opt"
                     break
@@ -386,6 +433,19 @@ configure_target() {
             read -r -p "Container Name (Leave empty for Native/Localhost): " dcont
         fi
 
+        if [ -z "$dcont" ]; then
+            ensure_db_client "$dtype"
+            
+            read -r -p "DB Host [127.0.0.1]: " dhost
+            dhost=${dhost:-127.0.0.1}
+            
+            local def_port="3306"
+            if [[ "$dtype" == "postgresql" ]]; then def_port="5432"; fi
+            
+            read -r -p "DB Port [$def_port]: " dport
+            dport=${dport:-$def_port}
+        fi
+
         read -r -p "DB Name: " dname
         read -r -p "DB User: " duser
         local vname="${name^^}_DB_PASSWORD"
@@ -393,13 +453,18 @@ configure_target() {
         read -rs -p "DB Password: " dpass; echo
         _add_secret "$vname" "$dpass"
         
-        export DT="$dtype" DC="$dcont" DN="$dname" DU="$duser" DP="\${$vname}"
+        export DT="$dtype" DC="$dcont" DN="$dname" DU="$duser" DP="\${$vname}" DH="$dhost" DPRT="$dport"
+        
         yq eval -i ".targets[strenv(YQ_NAME)].database.enable = true" "$CONFIG_FILE"
         yq eval -i ".targets[strenv(YQ_NAME)].database.type = strenv(DT)" "$CONFIG_FILE"
         if [ -n "$DC" ]; then
             yq eval -i ".targets[strenv(YQ_NAME)].database.container = strenv(DC) | .targets[strenv(YQ_NAME)].database.container style=\"double\"" "$CONFIG_FILE"
+            yq eval -i "del(.targets[strenv(YQ_NAME)].database.host)" "$CONFIG_FILE"
+            yq eval -i "del(.targets[strenv(YQ_NAME)].database.port)" "$CONFIG_FILE"
         else
             yq eval -i "del(.targets[strenv(YQ_NAME)].database.container)" "$CONFIG_FILE"
+            yq eval -i ".targets[strenv(YQ_NAME)].database.host = strenv(DH)" "$CONFIG_FILE"
+            yq eval -i ".targets[strenv(YQ_NAME)].database.port = env(DPRT)" "$CONFIG_FILE" 
         fi
         yq eval -i ".targets[strenv(YQ_NAME)].database.name = strenv(DN) | .targets[strenv(YQ_NAME)].database.name style=\"double\"" "$CONFIG_FILE"
         yq eval -i ".targets[strenv(YQ_NAME)].database.user = strenv(DU) | .targets[strenv(YQ_NAME)].database.user style=\"double\"" "$CONFIG_FILE"
