@@ -8,7 +8,10 @@ class CommandGeneratorMixin:
     def build_db_dump_command(self, db_config: dict, output_path: str) -> str | None:
         db_type = db_config.get('type', '').lower()
         container = db_config.get('container')
-        
+
+        db_host = db_config.get('host')
+        db_port = db_config.get('port')
+
         name = shlex.quote(db_config['name'])
         user = shlex.quote(db_config['user'])
         password = shlex.quote(db_config.get('password', ''))
@@ -19,18 +22,28 @@ class CommandGeneratorMixin:
 
         if db_type in ['mysql', 'mariadb']:
             dump_tool = 'mariadb-dump' if db_type == 'mariadb' else 'mysqldump'
-            flags = f"--user={user} --single-transaction --routines --triggers {name}"
+            flags = f"--user={user} --single-transaction --routines --triggers"
+
+            if db_host:
+                port_flag = f"-P {db_port}" if db_port else ""
+                host_flag = f"-h {shlex.quote(db_host)}"
+                cmd = f"MYSQL_PWD={password} {dump_tool} {host_flag} {port_flag} {flags} {name} > {output}"
             
-            if container:
-                cmd = f"docker exec -i -e MYSQL_PWD={password} {container_safe} {dump_tool} {flags} > {output}"
+            elif container:
+                cmd = f"docker exec -e MYSQL_PWD={password} {container_safe} {dump_tool} {flags} {name} > {output}"
             else:
-                cmd = f"MYSQL_PWD={password} {dump_tool} {flags} > {output}"
+                cmd = f"MYSQL_PWD={password} {dump_tool} {flags} {name} > {output}"
 
         elif db_type == 'postgresql':
             flags = f"-U {user} -d {name} -Fc"
+
+            if db_host:
+                port_flag = f"-p {db_port}" if db_port else ""
+                host_flag = f"-h {shlex.quote(db_host)}"
+                cmd = f"PGPASSWORD={password} pg_dump {host_flag} {port_flag} {flags} > {output}"
             
             if container:
-                cmd = f"docker exec -i -e PGPASSWORD={password} {container_safe} pg_dump {flags} > {output}"
+                cmd = f"docker exec -e PGPASSWORD={password} {container_safe} pg_dump {flags} > {output}"
             else:
                 cmd = f"PGPASSWORD={password} pg_dump {flags} > {output}"
         
