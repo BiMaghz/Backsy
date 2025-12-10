@@ -12,6 +12,8 @@ class DatabaseConfig(BaseModel):
     enable: bool = False
     type: Optional[Literal['mysql', 'mariadb', 'postgresql']] = None
     container: Optional[str] = None
+    host: Optional[str] = None
+    port: Optional[int] = None
     name: Optional[str] = None
     user: Optional[str] = None
     password: Optional[str] = None
@@ -19,8 +21,8 @@ class DatabaseConfig(BaseModel):
     @model_validator(mode='after')
     def check_db_requirements(self):
         if self.enable:
-            if not all([self.type, self.container, self.name, self.user, self.password]):
-                raise ValueError("If database is enabled, type, container, name, user, and password are required.")
+            if not all([self.type, self.name, self.user, self.password]):
+                raise ValueError("If database is enabled, type, name, user, and password are required.")
         return self
 
 class AuthConfig(BaseModel):
