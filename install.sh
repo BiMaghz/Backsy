@@ -646,11 +646,9 @@ VENV_PATH="$VENV_DIR"
 EOF
 
     for key in "${G_SECRET_VARS[@]}"; do
-        val="${G_SECRET_VALUES[$key]}"
-        # Escape quotes/backslashes
-        val="${val//\\/\\\\}"
-        val="${val//\"/\\\"}"
-        echo "export $key=\"$val\"" >> "$RUN_SCRIPT"
+        val="${G_SECRET_VALUES[$key]}"        
+        safe_val="${val//\'/\'\\\'\'}"
+        echo "export $key='$safe_val'" >> "$RUN_SCRIPT"
     done
 
     cat >> "$RUN_SCRIPT" <<'EOF'
