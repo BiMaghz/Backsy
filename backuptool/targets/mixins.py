@@ -37,13 +37,12 @@ class CommandGeneratorMixin:
         elif db_type == 'postgresql':
             flags = f"-U {user} -d {name} -Fc"
 
-            if db_host:
+            if container:
+                cmd = f"docker exec -e PGPASSWORD={password} {container_safe} pg_dump {flags} > {output}"
+            elif db_host:
                 port_flag = f"-p {db_port}" if db_port else ""
                 host_flag = f"-h {shlex.quote(db_host)}"
                 cmd = f"PGPASSWORD={password} pg_dump {host_flag} {port_flag} {flags} > {output}"
-            
-            if container:
-                cmd = f"docker exec -e PGPASSWORD={password} {container_safe} pg_dump {flags} > {output}"
             else:
                 cmd = f"PGPASSWORD={password} pg_dump {flags} > {output}"
         

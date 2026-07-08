@@ -23,41 +23,64 @@ class FileLock:
             return False
 
     def _handle_existing_lock(self):
+        """
+        Inspects an existing lock file and, if it's stale (corrupted or owned
+        by a dead PID), removes it so a fresh atomic create can be attempted.
+        If the lock is genuinely held by a live process, exits/raises.
+        """
         try:
             pid = int(self.lock_file.read_text().strip())
-            
-            if self._is_pid_running(pid):
-                msg = f"Lock file exists and PID {pid} is running. Another instance is active."
-                logger.warning(msg)
-                if self.exit_on_lock:
-                    sys.exit(0)
-                else:
-                    raise LockExistsError(msg)
-            else:
-                logger.warning(f"Found stale lock file from dead PID {pid}. Cleaning up...")
-                self.lock_file.unlink()
-                return True
-
         except (ValueError, OSError) as e:
             logger.warning(f"Lock file exists but is corrupted or unreadable ({e}). Cleaning up...")
             try:
                 self.lock_file.unlink()
             except OSError:
                 pass
-            return True
+            return
+
+        if self._is_pid_running(pid):
+            msg = f"Lock file exists and PID {pid} is running. Another instance is active."
+            logger.warning(msg)
+            if self.exit_on_lock:
+                sys.exit(0)
+            else:
+                raise LockExistsError(msg)
+        else:
+            logger.warning(f"Found stale lock file from dead PID {pid}. Cleaning up...")
+            try:
+                self.lock_file.unlink()
+            except OSError:
+                pass
 
     def __enter__(self):
-        if self.lock_file.exists():
-            self._handle_existing_lock()
+        current_pid = os.getpid()
 
-        try:
-            current_pid = os.getpid()
-            self.lock_file.write_text(str(current_pid))
-            logger.info(f"Lock file created at {self.lock_file} (PID: {current_pid})")
-        except OSError as e:
-            logger.critical(f"Failed to create lock file: {e}")
-            raise
-        return self
+        # Try a handful of times: two processes may race to clean up a stale
+        # lock and recreate it, so a single attempt isn't enough to guarantee
+        # correctness, but the O_CREAT|O_EXCL open below is what actually
+        # makes acquisition atomic (only one process can win it).
+        for _ in range(5):
+            try:
+                fd = os.open(self.lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                try:
+                    os.write(fd, str(current_pid).encode())
+                finally:
+                    os.close(fd)
+                logger.info(f"Lock file created at {self.lock_file} (PID: {current_pid})")
+                return self
+            except FileExistsError:
+                self._handle_existing_lock()
+                continue
+            except OSError as e:
+                logger.critical(f"Failed to create lock file: {e}")
+                raise
+
+        msg = "Could not acquire lock after multiple attempts (repeated race with another instance)."
+        logger.warning(msg)
+        if self.exit_on_lock:
+            sys.exit(0)
+        else:
+            raise LockExistsError(msg)
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         try:
