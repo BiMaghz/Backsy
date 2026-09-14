@@ -33,10 +33,14 @@ class LocalTarget(BaseTarget, CommandGeneratorMixin):
                 ext = "pgdump" if db_type == 'postgresql' else "sql"
                 dump_file = target_tmp_dir / f"{db_config['name']}_backup.{ext}"
                 
-                cmd = self.build_db_dump_command(db_config, str(dump_file))
-                
-                if cmd:
-                    subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True)
+                cmd_result = self.build_db_dump_command(db_config, str(dump_file))
+
+                if cmd_result:
+                    cmd, pwd_env_var = cmd_result
+                    dump_env = os.environ.copy()
+                    if pwd_env_var:
+                        dump_env[pwd_env_var] = db_config.get('password', '')
+                    subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True, env=dump_env)
                     logger.info("Local DB backup completed.")
                 else:
                     return None

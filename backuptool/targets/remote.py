@@ -1,3 +1,4 @@
+import io
 import logging
 import shlex
 from datetime import datetime, timezone
@@ -11,6 +12,22 @@ logger = logging.getLogger(__name__)
 THROTTLE_STR = "nice -n 15 ionice -c 3"
 
 class RemoteTarget(BaseTarget, CommandGeneratorMixin):
+    def _run_with_password(self, connection, cmd: str, pwd_env_var: str, password: str):
+        """
+        Runs `cmd` on the remote host, supplying the DB password through the
+        SSH stdin channel rather than the command text. Fabric's own `env=`
+        support works by prepending a literal `export VAR=value` to the
+        remote command, which would still leak the password via `ps` on the
+        remote host, so it isn't used here.
+        """
+        if not pwd_env_var:
+            connection.run(cmd, hide=True)
+            return
+
+        inner = f'IFS= read -r DBPWD && export {pwd_env_var}="$DBPWD" && {cmd}'
+        wrapped_cmd = f"sh -c {shlex.quote(inner)}"
+        connection.run(wrapped_cmd, hide=True, in_stream=io.StringIO(password + "\n"))
+
     def _check_remote_space(self, connection, path: str, required_mb: int = 500) -> bool:
         try:
             safe_path = shlex.quote(path)
@@ -62,10 +79,11 @@ class RemoteTarget(BaseTarget, CommandGeneratorMixin):
                     dump_filename = f"{db_config['name']}_backup.{ext}"
                     remote_dump_path = f"{remote_staging_dir}/{dump_filename}"
                     
-                    cmd = self.build_db_dump_command(db_config, remote_dump_path)
-                    
-                    if cmd:
-                        c.run(cmd, hide=True)
+                    cmd_result = self.build_db_dump_command(db_config, remote_dump_path)
+
+                    if cmd_result:
+                        cmd, pwd_env_var = cmd_result
+                        self._run_with_password(c, cmd, pwd_env_var, db_config.get('password', ''))
                         logger.info(f"Remote database dump created in staging directory: {dump_filename}")
 
                 for path_entry in self.config.get('paths', []):
