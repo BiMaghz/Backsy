@@ -66,9 +66,12 @@ class RemoteTarget(BaseTarget, CommandGeneratorMixin):
                     return None
 
                 timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d_%H-%M-%S')
-                remote_staging_dir = f"/tmp/backup_staging_{self.name}_{timestamp}"
-                c.run(f"mkdir -p {remote_staging_dir}", hide=True)
-                remote_cleanup_paths.append(remote_staging_dir)
+                # mktemp -d creates an unpredictable directory with mode 0700, so the staged
+                # data and the archive are never readable by other users on the remote host.
+                remote_work_dir = c.run("mktemp -d /tmp/backsy.XXXXXXXX", hide=True).stdout.strip()
+                remote_cleanup_paths.append(remote_work_dir)
+                remote_staging_dir = f"{remote_work_dir}/stage"
+                c.run(f"mkdir -m 700 {remote_staging_dir}", hide=True)
                 
                 db_config = self.config.get('database', {})
                 if db_config.get('enable'):
@@ -96,8 +99,8 @@ class RemoteTarget(BaseTarget, CommandGeneratorMixin):
                         c.run(f"{THROTTLE_STR} rsync -aR {shlex.quote(path_entry)} {remote_staging_dir}/", hide=True, warn=True)
 
                 archive_name = f"{timestamp}_{self.name}.tar.gz"
-                remote_archive_path = f"/tmp/{archive_name}"
-                remote_cleanup_paths.append(remote_archive_path)
+                # Sibling of the staging dir (inside the private work dir), so tar never packs itself.
+                remote_archive_path = f"{remote_work_dir}/{archive_name}"
 
                 use_pigz = c.run("command -v pigz", hide=True, warn=True).ok
                 
@@ -112,7 +115,7 @@ class RemoteTarget(BaseTarget, CommandGeneratorMixin):
                 logger.info("Running remote command to create archive.")
                 c.run(archive_cmd, hide=True)
 
-                size_result = c.run(f"stat -c %s {remote_archive_path}", hide=True)
+                size_result = c.run(f"stat -c %s {shlex.quote(remote_archive_path)}", hide=True)
                 remote_size_bytes = int(size_result.stdout.strip())
                 remote_size_mb = remote_size_bytes / (1024 * 1024)
 

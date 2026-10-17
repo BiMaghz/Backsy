@@ -2,12 +2,16 @@ import logging
 import os
 import requests
 
+from backuptool.core.redact import redact
+
 logger = logging.getLogger(__name__)
 
 def _send_to_telegram(message: str, token: str, chat_id: str, topic_id: str | None = None):
+    # Redact secrets, keep the ``` code fence intact, and stay under Telegram's 4096-char limit.
+    safe_message = redact(message).replace('`', "'")[:3500]
     payload = {
         'chat_id': chat_id,
-        'text': f"‼️ *CRITICAL: Backup Script Failure*\n\n```\n{message}\n```",
+        'text': f"‼️ *CRITICAL: Backup Script Failure*\n\n```\n{safe_message}\n```",
         'parse_mode': 'Markdown'
     }
 

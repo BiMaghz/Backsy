@@ -9,7 +9,9 @@ class CloudflareDestination(BaseDestination):
         super().__init__('Cloudflare', config, killer)
         self.worker_url = self.config['worker_url']
         self.api_token = self.config.get('api_token')
-        self.max_size_mb = 25
+        # The worker (and KV) cap a request at 25 MiB *including* multipart framing,
+        # so a full 25 MiB chunk is rejected with 413. Stay safely below it.
+        self.max_size_mb = 24
 
     @retry(max_retries=3, delay=10, backoff=2)
     def send(self, archive_path: Path, base_caption: str) -> bool | str:
@@ -21,7 +23,7 @@ class CloudflareDestination(BaseDestination):
 
         if file_size_mb > self.max_size_mb:
             self.logger.warning(f"File is too large ({file_size_mb:.2f} MB). Attempting to split into chunks...")
-            files_to_send = split_file(archive_path, 25)
+            files_to_send = split_file(archive_path, self.max_size_mb)
             if not files_to_send:
                 self.logger.error("File splitting failed. Aborting Cloudflare upload.")
                 return False

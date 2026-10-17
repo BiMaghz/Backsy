@@ -3,8 +3,10 @@ import os
 import requests
 import concurrent.futures
 import multiprocessing
+from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime, timezone
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from backuptool.targets.base import BaseTarget
 from backuptool.targets.local import LocalTarget
@@ -18,18 +20,33 @@ from backuptool.destinations.s3 import S3Destination
 from backuptool.core.crypto import encrypt_file
 from backuptool.core.signals import GracefulKiller
 
-from backuptool.utils.helpers import calculate_checksum
+from backuptool.utils.helpers import calculate_checksum, ensure_private_dir
+from backuptool.utils.notifications import send_fatal_alert
 
 logger = logging.getLogger(__name__)
+
+# Private (0700) working directory for plaintext dumps/archives. Deliberately not
+# under /tmp: /tmp is world-writable (symlink/squatting risk for a root process)
+# and is often a RAM-backed tmpfs.
+DEFAULT_TMP_DIR = Path("/var/lib/Backsy/tmp")
+
+
+@dataclass
+class TargetResult:
+    name: str
+    ok: bool
+    detail: str = ""
+
 
 class BackupManager:
     def __init__(self, config: dict, killer: GracefulKiller):
         self.config = config
         self.killer = killer
-        self.tmp_dir = Path("/tmp/Backsy") # Or your preferred temp location like /dev/shm/Backsy
+        self.tmp_dir = DEFAULT_TMP_DIR
         self.targets_config = config.get('targets', {})
         self.services_config = config.get('services', {})
-        
+        self._encryption_pass = None
+
         self.targets = self._initialize_targets()
         self.destinations = self._initialize_destinations()
 
@@ -75,13 +92,16 @@ class BackupManager:
             logger.error(f"Disk space check failed: Path '{path}' does not exist.")
             return False
 
-    def _send_to_destinations(self, archive_path: Path, target_name: str):
+    def _send_to_destinations(self, archive_path: Path, target_name: str) -> list[str]:
+        """Sends the archive everywhere. Returns the names of destinations that failed."""
         if not self.destinations:
             logger.warning("No destinations enabled. Backup archive is only available locally in temp.")
-            return
+            return []
+
+        failed: list[str] = []
 
         total_size_mb = archive_path.stat().st_size / (1024 * 1024)
-        
+
         archive_checksum = calculate_checksum(str(archive_path))
         logger.info(f"Calculated checksum for '{archive_path.name}': {archive_checksum}")
 
@@ -92,15 +112,22 @@ class BackupManager:
             f"• *Archive:* `{archive_path.name}` ({total_size_mb:.2f} MB)\n"
             f"• *Archive SHA256:* `{archive_checksum}`\n"
         )
-        
+
         link_caption_update = ""
 
         if 'cloudflare' in self.destinations:
             logger.info("--- Processing Cloudflare destination sequentially ---")
-            result = self.destinations['cloudflare'].send(archive_path, base_caption)
-            if isinstance(result, str):
-                link_caption_update = result
-        
+            # Guarded: a Cloudflare outage must not stop S3/Telegram from running.
+            try:
+                result = self.destinations['cloudflare'].send(archive_path, base_caption)
+                if isinstance(result, str):
+                    link_caption_update = result
+                elif not result:
+                    failed.append('cloudflare')
+            except Exception as exc:
+                logger.error(f"Destination 'cloudflare' failed: {exc}")
+                failed.append('cloudflare')
+
         elif 's3' in self.destinations:
             s3_dest = self.destinations['s3']
             if not link_caption_update:
@@ -108,93 +135,141 @@ class BackupManager:
                 if url:
                     link_caption_update = f"\n• [S3 Direct Link]({url})"
                     logger.info("Generated S3 pre-signed URL for caption.")
-        
+
         other_destinations = {n: d for n, d in self.destinations.items() if n != 'cloudflare'}
 
         if other_destinations:
             logger.info(f"--- Processing remaining destinations in parallel: {list(other_destinations.keys())} ---")
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(other_destinations)) as executor:
                 future_to_dest = {
-                    executor.submit(dest.send, archive_path, base_caption, link_caption_update): name 
+                    executor.submit(dest.send, archive_path, base_caption, link_caption_update): name
                     for name, dest in other_destinations.items()
                 }
                 for future in concurrent.futures.as_completed(future_to_dest):
                     dest_name = future_to_dest[future]
                     try:
-                        future.result()
+                        if future.result() is False:
+                            failed.append(dest_name)
                     except Exception as exc:
                         logger.error(f"Parallel task for '{dest_name}' generated an exception: {exc}")
+                        failed.append(dest_name)
 
-    def run(self):
-        logger.info("Backup process started for all configured targets.")
-        self.tmp_dir.mkdir(parents=True, exist_ok=True)
-        
-        if not self._check_disk_space(self.tmp_dir):
+        return failed
+
+    def _encrypt(self, archive_path: Path) -> Path | None:
+        """Returns the path to upload, or None if encryption was required but failed."""
+        if not self._encryption_pass:
+            return archive_path
+
+        encrypted_path = encrypt_file(archive_path, self._encryption_pass)
+        if encrypted_path is None:
+            logger.error("Encryption failed! Aborting upload for safety.")
+            return None  # the plaintext archive is removed by _process_target's cleanup
+
+        try:
+            archive_path.unlink()
+            logger.info(f"Removed unencrypted file: {archive_path.name}")
+        except OSError as e:
+            logger.warning(f"Failed to remove unencrypted file: {e}")
+        return encrypted_path
+
+    def _process_target(self, target: BaseTarget) -> TargetResult:
+        """Full pipeline for one target (backup -> encrypt -> upload -> cleanup), run in a worker thread."""
+        if self.killer.kill_now:
+            return TargetResult(target.name, False, "skipped (interrupted by signal)")
+
+        archive_path = final_path = None
+        try:
+            logger.info(f"===== Starting Target: {target.name} =====")
+            archive_path = target.execute()
+            if not (archive_path and archive_path.exists()):
+                logger.error(f"Backup failed for target '{target.name}'. Skipping destinations.")
+                return TargetResult(target.name, False, "backup failed")
+
+            final_path = self._encrypt(archive_path)
+            if final_path is None:
+                return TargetResult(target.name, False, "encryption failed")
+
+            failed = self._send_to_destinations(final_path, target.name)
+            if failed:
+                return TargetResult(target.name, False, f"upload failed: {', '.join(failed)}")
+            return TargetResult(target.name, True)
+
+        except Exception as exc:
+            logger.error(f"Target '{target.name}' generated an exception during execution: {exc}", exc_info=True)
+            return TargetResult(target.name, False, f"{type(exc).__name__}: {exc}")
+        finally:
+            for path in {archive_path, final_path}:
+                if path is None:
+                    continue
+                try:
+                    if path.exists():
+                        path.unlink()
+                        logger.info(f"Cleaned up temporary archive: {path}")
+                except OSError as e:
+                    logger.warning(f"Could not clean up archive {path}: {e}")
+
+    def _ping_healthcheck(self, ok: bool) -> None:
+        url = self.config.get('monitoring', {}).get('healthcheck_url')
+        if not url:
             return
+
+        parts = urlsplit(url)
+        if '/api/push/' in parts.path:
+            # Uptime Kuma push monitor: status is a query parameter.
+            query = dict(parse_qsl(parts.query, keep_blank_values=True))
+            query['status'] = 'up' if ok else 'down'
+            if not ok:
+                query['msg'] = 'Backup failed'
+            parts = parts._replace(query=urlencode(query))
+        elif not ok:
+            # Healthchecks.io style: <url>/fail signals failure.
+            parts = parts._replace(path=parts.path.rstrip('/') + '/fail')
+
+        try:
+            requests.get(urlunsplit(parts), timeout=10).raise_for_status()
+            logger.info(f"Healthcheck ping sent successfully ({'success' if ok else 'failure'}).")
+        except Exception as e:
+            logger.warning(f"Failed to send healthcheck ping: {e}")
+
+    def _finish(self, results: list[TargetResult]) -> bool:
+        failed = [r for r in results if not r.ok]
+        for r in results:
+            if r.ok:
+                logger.info(f"✔ {r.name}: OK")
+            else:
+                logger.error(f"✘ {r.name}: {r.detail}")
+
+        ok = not failed
+        self._ping_healthcheck(ok)
+        if not ok:
+            lines = "\n".join(f"- {r.name}: {r.detail}" for r in failed)
+            send_fatal_alert(f"Backup finished with {len(failed)} failure(s):\n{lines}", config=self.config)
+        return ok
+
+    def run(self) -> bool:
+        """Runs all targets. Returns True only if every target was backed up and delivered."""
+        logger.info("Backup process started for all configured targets.")
+        ensure_private_dir(self.tmp_dir)
+
+        if not self._check_disk_space(self.tmp_dir):
+            return self._finish([TargetResult("(all targets)", False, "low disk space in temp directory")])
 
         if not self.targets:
-            logger.warning("No targets configured in 'config.yml'. Exiting.")
-            return
+            logger.error("No valid targets configured in 'config.yml'.")
+            return self._finish([TargetResult("(config)", False, "no valid targets configured")])
 
-        encryption_pass = os.getenv("BACKUP_ENCRYPTION_PASSWORD")
-        if encryption_pass:
+        self._encryption_pass = os.getenv("BACKUP_ENCRYPTION_PASSWORD")
+        if self._encryption_pass:
             logger.info("🔒 Encryption is ENABLED. Archives will be encrypted with GPG.")
 
         cpu_count = multiprocessing.cpu_count()
         max_concurrent_backups = max(1, min(2, cpu_count // 2))
-        
+
         logger.info(f"Processing {len(self.targets)} target(s) with {max_concurrent_backups} concurrent worker(s)...")
-        
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_concurrent_backups) as executor:
-            future_to_target = {executor.submit(target.execute): target for target in self.targets}
-            
-            for future in concurrent.futures.as_completed(future_to_target):
-                if self.killer.kill_now:
-                    logger.critical("Process interrupted by signal. Stopping manager loop.")
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    break
-                target = future_to_target[future]
-                logger.info(f"===== Processing result for Target: {target.name} =====")
-                try:
-                    archive_path = future.result()
-                    
-                    if archive_path and archive_path.exists():
-                        final_path_to_send = archive_path
-                        
-                        if encryption_pass:
-                            encrypted_path = encrypt_file(archive_path, encryption_pass)
-                            if encrypted_path:
-                                try:
-                                    archive_path.unlink()
-                                    logger.info(f"Removed unencrypted file: {archive_path.name}")
-                                    final_path_to_send = encrypted_path
-                                except OSError as e:
-                                    logger.warning(f"Failed to remove unencrypted file: {e}")
-                            else:
-                                logger.error("Encryption failed! Aborting upload for safety.")
-                                try:
-                                    archive_path.unlink()
-                                except: pass
-                                continue 
+            results = list(executor.map(self._process_target, self.targets))
 
-                        self._send_to_destinations(final_path_to_send, target.name)
-                        
-                        try:
-                            final_path_to_send.unlink()
-                            logger.info(f"Cleaned up temporary archive: {final_path_to_send}")
-                        except OSError as e:
-                            logger.warning(f"Could not clean up archive {final_path_to_send}: {e}")
-                    else:
-                        logger.error(f"Backup failed for target '{target.name}'. Skipping destinations.")
-                except Exception as exc:
-                    logger.error(f"Target '{target.name}' generated an exception during execution: {exc}", exc_info=True)
-        
         logger.info("Backup process finished for all targets.")
-
-        hc_url = self.config.get('monitoring', {}).get('healthcheck_url')
-        if hc_url:
-            try:
-                requests.get(hc_url, timeout=10)
-                logger.info("Healthcheck ping sent successfully.")
-            except Exception as e:
-                logger.warning(f"Failed to send healthcheck ping: {e}")
+        return self._finish(results)

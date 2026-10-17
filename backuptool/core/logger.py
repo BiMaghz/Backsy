@@ -4,9 +4,16 @@ import os
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
 
+from backuptool.core.redact import redact
+
 LOG_FILE = "/var/log/Backsy.log"
 MAX_BYTES = 10 * 1024 * 1024
 BACKUP_COUNT = 5
+
+class RedactingFormatter(logging.Formatter):
+    """Scrubs secrets (bot tokens, signed URLs) from every line, including tracebacks."""
+    def format(self, record):
+        return redact(super().format(record))
 
 def setup_logging():
     log_path = Path(LOG_FILE)
@@ -22,7 +29,7 @@ def setup_logging():
         print(f"Critical Error: Cannot create/write log file at {LOG_FILE}.\nDetails: {e}", file=sys.stderr)
         sys.exit(1)
 
-    log_formatter = logging.Formatter(
+    log_formatter = RedactingFormatter(
         '%(asctime)s [%(levelname)-8s] [%(name)s] %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
     )

@@ -1,4 +1,6 @@
 import hashlib
+import os
+import stat
 import time
 import subprocess
 import shutil
@@ -7,6 +9,27 @@ from pathlib import Path
 from functools import wraps
 
 logger = logging.getLogger(__name__)
+
+def ensure_private_dir(path: Path) -> None:
+    """
+    Create `path` with mode 0700, or verify that an existing one is a real
+    directory (not a symlink), owned by the current user, and not accessible to
+    others. Protects the working directory holding plaintext dumps/archives.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+
+    st = os.lstat(path)  # lstat: do not follow a planted symlink
+    if not stat.S_ISDIR(st.st_mode):
+        raise RuntimeError(f"'{path}' exists but is not a real directory (symlink?). Refusing to use it.")
+    if st.st_uid != os.geteuid():
+        raise RuntimeError(f"'{path}' is owned by uid {st.st_uid}, expected {os.geteuid()}. Refusing to use it.")
+    if st.st_mode & 0o077:
+        os.chmod(path, 0o700)
 
 def calculate_checksum(file_path: str) -> str:
     sha256_hash = hashlib.sha256()
