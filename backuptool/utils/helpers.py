@@ -1,12 +1,15 @@
 import hashlib
 import os
 import stat
+import random
 import time
 import subprocess
 import shutil
 import logging
 from pathlib import Path
 from functools import wraps
+
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +45,52 @@ def calculate_checksum(file_path: str) -> str:
         logging.error(f"Checksum calculation failed: File not found at {file_path}")
         return ""
 
-def retry(max_retries: int = 3, delay: int = 5, backoff: int = 2):
+_TRANSIENT_HTTP_STATUS = {408, 425, 429, 500, 502, 503, 504}
+_TRANSIENT_S3_CODES = {"RequestTimeout", "Throttling", "ThrottlingException", "SlowDown", "InternalError", "ServiceUnavailable"}
+_MAX_RETRY_AFTER = 120
+
+def is_transient_error(exc: BaseException) -> bool:
+    """
+    True for failures worth retrying: network errors, timeouts, throttling and 5xx.
+    Authentication/validation failures (other 4xx) will not fix themselves, so they fail fast.
+    """
+    if isinstance(exc, requests.exceptions.HTTPError):
+        status = exc.response.status_code if exc.response is not None else None
+        return status is None or status in _TRANSIENT_HTTP_STATUS
+    if isinstance(exc, (requests.exceptions.ConnectionError, requests.exceptions.Timeout,
+                        requests.exceptions.ChunkedEncodingError, ConnectionError, TimeoutError)):
+        return True
+
+    # boto3 wraps the underlying ClientError of a failed upload in S3UploadFailedError.
+    if type(exc).__name__ == "S3UploadFailedError" and exc.__context__ is not None:
+        return is_transient_error(exc.__context__)
+
+    try:
+        from botocore.exceptions import ClientError, ConnectionError as BotoConnectionError, HTTPClientError
+    except ImportError:
+        return False
+    if isinstance(exc, (BotoConnectionError, HTTPClientError)):
+        return True
+    if isinstance(exc, ClientError):
+        status = exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode")
+        code = exc.response.get("Error", {}).get("Code", "")
+        return status in _TRANSIENT_HTTP_STATUS or code in _TRANSIENT_S3_CODES
+    return False
+
+def _retry_after_seconds(exc: BaseException) -> float:
+    """Server-requested wait (HTTP Retry-After header or Telegram's parameters.retry_after) on 429."""
+    response = getattr(exc, "response", None)
+    if response is None or getattr(response, "status_code", None) != 429:
+        return 0
+    try:
+        wait = float(response.headers.get("Retry-After") or 0)
+        if not wait:
+            wait = float(response.json().get("parameters", {}).get("retry_after", 0))
+    except (ValueError, TypeError, AttributeError):
+        return 0
+    return min(wait, _MAX_RETRY_AFTER)
+
+def retry(max_retries: int = 3, delay: int = 5, backoff: int = 2, retry_on=is_transient_error):
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
@@ -52,14 +100,18 @@ def retry(max_retries: int = 3, delay: int = 5, backoff: int = 2):
                 try:
                     return func(*args, **kwargs)
                 except Exception as e:
+                    if not retry_on(e):
+                        logger.error(f"'{func.__name__}' failed with a non-retryable error: {e}")
+                        raise
+                    if attempt + 1 == max_retries:
+                        logger.error(f"Function '{func.__name__}' failed after {max_retries} attempts: {e}")
+                        raise
+                    wait = max(current_delay, _retry_after_seconds(e)) * random.uniform(0.8, 1.2)
                     logger.warning(
                         f"Attempt {attempt + 1} of {max_retries} for '{func.__name__}' failed: {e}. "
-                        f"Retrying in {current_delay} seconds..."
+                        f"Retrying in {wait:.0f} seconds..."
                     )
-                    if attempt + 1 == max_retries:
-                        logger.error(f"Function '{func.__name__}' failed after {max_retries} attempts.")
-                        raise
-                    time.sleep(current_delay)
+                    time.sleep(wait)
                     current_delay *= backoff
         return wrapper
     return decorator

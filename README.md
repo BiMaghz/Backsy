@@ -31,8 +31,12 @@ After installation, you can run the same command again to access the management 
 1.  **Create Worker:** In Cloudflare Dashboard > **Workers & Pages**, create a new worker.
 2.  **Deploy Code:** Paste the contents of [worker.js](https://raw.githubusercontent.com/BiMaghz/Backsy/main/backuptool/cloudflare-worker/worker.js) and deploy.
 3.  **KV Namespace:** In Worker Settings > **Variables**, add a KV Namespace binding named `BACKUP_KV` (Create a new namespace if needed).
-4.  **API Token:** In Variables, add `API_TOKEN` with a strong password (click Encrypt). Use this same token during Backsy setup.
+4.  **API Token (required):** In Variables, add `API_TOKEN` with a strong password (click Encrypt). Use this same token during Backsy setup. A worker without `API_TOKEN` rejects all uploads.
 5.  **Redeploy:** Go to the deployments tab and redeploy to apply changes.
+
+#### Remote Targets (SSH host keys)
+
+Backsy only connects to servers whose SSH host key it already knows. The setup wizard shows the server's fingerprints and asks you to confirm them; they are stored in `/opt/Backsy/known_hosts`. For targets configured earlier (or after a server is reinstalled), use **Trust SSH Host Keys** in the manager menu. A *changed* key is reported as a possible man-in-the-middle and the target is skipped.
 
 #### S3 Storage (R2, ArvanCloud, AWS)
 

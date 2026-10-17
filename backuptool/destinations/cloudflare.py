@@ -9,6 +9,8 @@ class CloudflareDestination(BaseDestination):
         super().__init__('Cloudflare', config, killer)
         self.worker_url = self.config['worker_url']
         self.api_token = self.config.get('api_token')
+        if not self.api_token:
+            self.logger.warning("No 'api_token' configured. The worker now rejects uploads unless its API_TOKEN secret is set and sent.")
         # The worker (and KV) cap a request at 25 MiB *including* multipart framing,
         # so a full 25 MiB chunk is rejected with 413. Stay safely below it.
         self.max_size_mb = 24

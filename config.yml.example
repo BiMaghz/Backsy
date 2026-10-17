@@ -69,7 +69,8 @@ services:
   cloudflare:
     enable: true
     worker_url: https://your-backup-worker.your-domain.workers.dev
-    # api_token: ${CLOUDFLARE_API_TOKEN}
+    # Required: must match the worker's API_TOKEN secret (the worker rejects uploads without it).
+    api_token: ${CLOUDFLARE_API_TOKEN}
       
   telegram:
     enable: true

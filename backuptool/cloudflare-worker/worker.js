@@ -1,3 +1,14 @@
+// Constant-time comparison: both values are hashed to equal length first, so neither
+// the content nor the length of the expected token leaks through timing.
+async function safeEqual(a, b) {
+  const enc = new TextEncoder();
+  const [ha, hb] = await Promise.all([
+    crypto.subtle.digest('SHA-256', enc.encode(a)),
+    crypto.subtle.digest('SHA-256', enc.encode(b)),
+  ]);
+  return crypto.subtle.timingSafeEqual(ha, hb);
+}
+
 export default {
   async fetch(request, env, ctx) {
     const { pathname } = new URL(request.url);
@@ -11,7 +22,11 @@ export default {
 
     try {
       if (request.method === 'POST' && pathname === '/upload') {
-        if (authToken && request.headers.get('Authorization') !== `Bearer ${authToken}`) {
+        // Fail closed: a worker without API_TOKEN must not accept anonymous uploads.
+        if (!authToken) {
+          return new Response('Server misconfigured: API_TOKEN is not set', { status: 500 });
+        }
+        if (!(await safeEqual(request.headers.get('Authorization') || '', `Bearer ${authToken}`))) {
           return new Response('Unauthorized', { status: 401 });
         }
 
@@ -81,16 +96,17 @@ export default {
         }
 
         const metadata = kvValue.metadata || {};
-        const filename = metadata.filename || `${metadata.day || 'backup'}.tar.gz`;
+        const rawName = metadata.filename || `${metadata.day || 'backup'}.tar.gz`;
+        const filename = rawName.replace(/[^A-Za-z0-9._-]/g, '_'); // keep the header parameter well-formed
 
-        return new Response(kvValue.value, {
-          headers: {
-            'Content-Type': 'application/gzip',
-            'Content-Disposition': `attachment; filename="${filename}"`,
-            'Content-Length': metadata.size || '',
-            'Cache-Control': 'no-store'
-          }
-        });
+        const headers = {
+          'Content-Type': 'application/gzip',
+          'Content-Disposition': `attachment; filename="${filename}"`,
+          'Cache-Control': 'no-store'
+        };
+        if (metadata.size) headers['Content-Length'] = String(metadata.size);
+
+        return new Response(kvValue.value, { headers });
       }
 
       return new Response('Not Found', { status: 404 });

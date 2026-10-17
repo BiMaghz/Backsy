@@ -256,6 +256,9 @@ class BackupManager:
             else:
                 logger.error(f"✘ {r.name}: {r.detail}")
 
+        if self.killer.kill_now:
+            logger.warning("The run was interrupted by a termination signal; some targets may have been skipped.")
+
         ok = not failed
         self._ping_healthcheck(ok)
         if not ok:

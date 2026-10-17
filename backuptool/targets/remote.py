@@ -6,7 +6,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from .base import BaseTarget
 from .mixins import CommandGeneratorMixin
+from backuptool.core.config import KNOWN_HOSTS_PATH
 from backuptool.utils.paths import plan_paths
+import paramiko
 from fabric import Connection
 
 logger = logging.getLogger(__name__)
@@ -15,10 +17,17 @@ THROTTLE_STR = "nice -n 15 ionice -c 3"
 
 class RemoteTarget(BaseTarget, CommandGeneratorMixin):
     def _connection(self, connect_kwargs: dict) -> Connection:
-        return Connection(
+        conn = Connection(
             host=self.config['host'], user=self.config.get('user', 'root'),
             port=self.config.get('port', 22), connect_kwargs=connect_kwargs
         )
+        # Fabric's default silently accepts unknown host keys. Verify against known hosts
+        # (~/.ssh/known_hosts plus our own file) and refuse anything unrecognised, otherwise
+        # an on-path attacker could capture the DB password and the whole backup.
+        if KNOWN_HOSTS_PATH.exists():
+            conn.client.load_host_keys(str(KNOWN_HOSTS_PATH))
+        conn.client.set_missing_host_key_policy(paramiko.RejectPolicy())
+        return conn
 
     def _run_with_password(self, connection, cmd: str, pwd_env_var: str, password: str):
         """
@@ -184,6 +193,24 @@ class RemoteTarget(BaseTarget, CommandGeneratorMixin):
                 finally:
                     self._remove_remote_dir(c, remote_work_dir, connect_kwargs)
 
+        except paramiko.BadHostKeyException as e:
+            logger.error(
+                f"HOST KEY MISMATCH for {self.config['host']}: the server presented a different key than the one "
+                f"on record. This can mean a man-in-the-middle attack, or the server was reinstalled. "
+                f"Verify, then update '{KNOWN_HOSTS_PATH}'. ({e})"
+            )
+            return None
+        except paramiko.SSHException as e:
+            if "known_hosts" in str(e) or "known hosts" in str(e):
+                port = self.config.get('port', 22)
+                logger.error(
+                    f"Host key of {self.config['host']} is not trusted yet. Verify its fingerprint, then run: "
+                    f"ssh-keyscan -p {port} {self.config['host']} >> {KNOWN_HOSTS_PATH}  "
+                    f"(or use 'Trust SSH host keys' in the install.sh manager menu)."
+                )
+            else:
+                logger.error(f"SSH error during remote backup for '{self.name}': {e}", exc_info=True)
+            return None
         except Exception as e:
             logger.error(f"Failed to perform remote backup for '{self.name}': {e}", exc_info=True)
             return None

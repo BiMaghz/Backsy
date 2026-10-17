@@ -1,13 +1,18 @@
 import os
+from pathlib import Path
 import re
 import yaml
 import logging
 from typing import List, Dict, Optional, Literal
-from pydantic import BaseModel, ConfigDict, Field, model_validator, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator, ValidationError
 
 from backuptool.utils.paths import plan_paths
 
 CONFIG_PATH = "config.yml"
+# SSH host keys that remote targets are verified against (lives next to config.yml).
+KNOWN_HOSTS_PATH = Path(CONFIG_PATH).resolve().parent / "known_hosts"
+# Target names end up in file names, archive names and S3 keys.
+_TARGET_NAME = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')
 logger = logging.getLogger(__name__)
 
 class _Model(BaseModel):
@@ -116,6 +121,17 @@ class AppConfig(_Model):
     targets: Dict[str, TargetConfig]
     services: ServicesConfig
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
+
+    @field_validator('targets')
+    @classmethod
+    def check_target_names(cls, targets):
+        bad = [name for name in targets if not _TARGET_NAME.match(name)]
+        if bad:
+            raise ValueError(
+                f"Invalid target name(s): {bad}. Use 1-64 letters, digits, '.', '_' or '-', "
+                f"starting with a letter or digit."
+            )
+        return targets
 
 _PLACEHOLDER = re.compile(r'\$\{([^}]+)\}')
 

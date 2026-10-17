@@ -12,7 +12,14 @@ readonly PROJECT_DIR="/opt/Backsy"
 readonly VENV_DIR="$PROJECT_DIR/venv"
 readonly CONFIG_FILE="$PROJECT_DIR/config.yml"
 readonly RUN_SCRIPT="$PROJECT_DIR/run_backup.sh"
-readonly PYTHON_EXEC="${PYTHON_EXEC:-python3}"
+PYTHON_EXEC="${PYTHON_EXEC:-}"   # chosen by select_python (must be >= 3.10)
+readonly KNOWN_HOSTS="$PROJECT_DIR/known_hosts"
+
+# yq is pinned and verified (SHA-256 from the project's published checksums file).
+# To upgrade: change the version and both hashes together.
+readonly YQ_VERSION="v4.54.1"
+readonly YQ_SHA256_AMD64="8e34fc298390875de416e6a4afcb8cabeceb25d9aa8506c1a2f9353cf702ea5f"
+readonly YQ_SHA256_ARM64="189088da0c6429ec5178dfaab1a114805f6cab0b61b165ab236efedf1d57a71b"
 readonly REPO_URL="https://github.com/BiMaghz/Backsy.git"
 readonly LOG_FILE="/var/log/Backsy.log"
 
@@ -70,11 +77,79 @@ _add_secret() {
     G_SECRET_VALUES["$var"]="$val"
 }
 
+# --- Python / name / host-key helpers ---
+_python_ok() {
+    "$1" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)' &>/dev/null
+}
+
+select_python() {
+    local cand
+    for cand in "$PYTHON_EXEC" python3.13 python3.12 python3.11 python3.10 python3; do
+        [ -n "$cand" ] || continue
+        if command -v "$cand" &>/dev/null && _python_ok "$cand"; then
+            PYTHON_EXEC="$cand"
+            return 0
+        fi
+    done
+    return 1
+}
+
+_valid_target_name() {
+    [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]
+}
+
+# Shows the server's host key fingerprints and, on confirmation, pins them in $KNOWN_HOSTS.
+trust_host_key() {
+    local host="$1" port="$2" scan tmp entry
+    scan=$(ssh-keyscan -T 10 -p "$port" "$host" 2>/dev/null || true)
+    if [ -z "$scan" ]; then
+        print_error "Could not fetch host keys from $host:$port"
+        return 1
+    fi
+
+    tmp=$(mktemp)
+    printf '%s\n' "$scan" > "$tmp"
+    print_info "Host key fingerprints offered by $host:$port:"
+    ssh-keygen -lf "$tmp" | sed 's/^/    /'
+    read -r -p "Trust these keys? Compare them with the server's own fingerprints first. (y/n) [n]: " ans
+    if [[ "${ans,,}" != "y" ]]; then
+        rm -f "$tmp"
+        return 1
+    fi
+
+    entry="$host"
+    [ "$port" != "22" ] && entry="[$host]:$port"
+    touch "$KNOWN_HOSTS"; chmod 600 "$KNOWN_HOSTS"
+    ssh-keygen -R "$entry" -f "$KNOWN_HOSTS" &>/dev/null || true   # replace any older key for this host
+    rm -f "$KNOWN_HOSTS.old"
+    cat "$tmp" >> "$KNOWN_HOSTS"
+    rm -f "$tmp"
+    print_success "Host key saved to $KNOWN_HOSTS"
+}
+
+# Manager action: (re)trust the host keys of every remote target in config.yml.
+trust_all_remote_hosts() {
+    print_header "Trust SSH Host Keys"
+    local rows name host port
+    rows=$(yq eval '.targets | to_entries | .[] | select(.value.type == "remote") | .key + " " + .value.host + " " + ((.value.port // 22) | tostring)' "$CONFIG_FILE")
+    if [ -z "$rows" ]; then
+        print_info "No remote targets configured."
+        return 0
+    fi
+    # Rows come in on fd 3 so that stdin stays free for trust_host_key's confirmation prompt.
+    while IFS=' ' read -r -u 3 name host port; do   # IFS is newline/tab script-wide
+        [ -n "$name" ] || continue
+        print_info "Target: $name"
+        trust_host_key "$host" "$port" || print_warning "Not trusted: $host:$port"
+    done 3<<< "$rows"
+}
+
 # --- Dependency Management ---
 check_dependencies() {
     print_header "Checking Dependencies"
 
-    local required=(git curl rsync sshpass)
+    local required=(git curl rsync sshpass ssh-keyscan)
+    local ssh_pkg=""
     local missing=()
     local pkg_manager=""    
     local cron_pkg=""
@@ -85,32 +160,47 @@ check_dependencies() {
         pkg_manager="apt"
         cron_pkg="cron"
         gpg_pkg="gnupg"
+        ssh_pkg="openssh-client"
     elif command -v dnf &>/dev/null; then
         pkg_manager="dnf"
         cron_pkg="cronie"
         gpg_pkg="gnupg2"
+        ssh_pkg="openssh-clients"
     elif command -v yum &>/dev/null; then
         pkg_manager="yum"
         cron_pkg="cronie"
         gpg_pkg="gnupg2"
+        ssh_pkg="openssh-clients"
     elif command -v pacman &>/dev/null; then
         pkg_manager="pacman"
         cron_pkg="cronie"
         gpg_pkg="gnupg"
+        ssh_pkg="openssh"
     fi
 
     # Check standard binaries
     for cmd in "${required[@]}"; do
-        command -v "$cmd" &>/dev/null || missing+=("$cmd")
+        if ! command -v "$cmd" &>/dev/null; then
+            if [ "$cmd" == "ssh-keyscan" ]; then
+                [ -n "$ssh_pkg" ] && missing+=("$ssh_pkg")
+            else
+                missing+=("$cmd")
+            fi
+        fi
     done
 
-    # Check Python
-    if ! command -v "$PYTHON_EXEC" &>/dev/null; then
+    # Check Python (Backsy needs 3.10+)
+    if ! select_python; then
+        if command -v python3 &>/dev/null; then
+            print_error "Backsy needs Python 3.10 or newer, but found: $(python3 -V 2>&1)"
+            print_info "Install a newer Python (e.g. python3.11), or run with PYTHON_EXEC=/path/to/python3.x"
+            exit 1
+        fi
         missing+=("python3")
     fi
 
     # Check venv support properly
-    if ! "$PYTHON_EXEC" -c "import ensurepip" &>/dev/null; then
+    if [ -z "$PYTHON_EXEC" ] || ! "$PYTHON_EXEC" -c "import ensurepip" &>/dev/null; then
          missing+=("python3-venv")
     fi
 
@@ -154,6 +244,12 @@ check_dependencies() {
         esac
     fi
 
+    # Packages may just have brought in Python: re-check the version.
+    if ! select_python; then
+        print_error "No Python 3.10+ interpreter available. Install one (e.g. python3.11) or set PYTHON_EXEC."
+        exit 1
+    fi
+
     # Check/Install yq (mikefarah)
     if ! command -v yq &>/dev/null || ! yq --version 2>&1 | grep -qi "mikefarah"; then
         print_warning "Installing yq..."
@@ -163,23 +259,32 @@ check_dependencies() {
             exit 1
         fi
 
-        local arch
+        local arch expected
         case "$(uname -m)" in
-            x86_64) arch="amd64" ;;
-            aarch64|arm64) arch="arm64" ;;
+            x86_64)        arch="amd64"; expected="$YQ_SHA256_AMD64" ;;
+            aarch64|arm64) arch="arm64"; expected="$YQ_SHA256_ARM64" ;;
             *)
                 print_error "Unsupported architecture: $(uname -m)"
                 exit 1
             ;;
         esac
 
-        curl -fsSL -o /usr/local/bin/yq \
-            "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${arch}" || {
+        local tmp_yq
+        tmp_yq=$(mktemp)
+        curl -fsSL -o "$tmp_yq" \
+            "https://github.com/mikefarah/yq/releases/download/${YQ_VERSION}/yq_linux_${arch}" || {
+                rm -f "$tmp_yq"
                 print_error "Failed to download yq"
                 exit 1
             }
 
-        chmod +x /usr/local/bin/yq
+        if ! echo "${expected}  ${tmp_yq}" | sha256sum -c --status -; then
+            rm -f "$tmp_yq"
+            print_error "yq checksum mismatch - refusing to install it."
+            exit 1
+        fi
+        install -m 755 "$tmp_yq" /usr/local/bin/yq
+        rm -f "$tmp_yq"
     fi
 
     print_success "All dependencies are installed and ready."
@@ -258,6 +363,11 @@ configure_target() {
             read -r -p "Port [22]: " port
             
             export H="$host" U="${user:-root}" P="${port:-22}"
+
+            if ! trust_host_key "$H" "$P"; then
+                print_warning "Host key not trusted. Please re-enter the connection details."
+                continue
+            fi
             
             yq eval -i ".targets[strenv(YQ_NAME)].host = strenv(H) | .targets[strenv(YQ_NAME)].host style=\"double\"" "$CONFIG_FILE"
             yq eval -i ".targets[strenv(YQ_NAME)].user = strenv(U) | .targets[strenv(YQ_NAME)].user style=\"double\"" "$CONFIG_FILE"
@@ -273,8 +383,8 @@ configure_target() {
             local pass_val=""
 
             local -a ssh_base_opts=(
-                -o StrictHostKeyChecking=no 
-                -o UserKnownHostsFile=/dev/null 
+                -o StrictHostKeyChecking=yes
+                -o UserKnownHostsFile="$KNOWN_HOSTS"
                 -o ConnectTimeout=10 
                 -o LogLevel=ERROR
                 -p "$P"
@@ -308,7 +418,8 @@ configure_target() {
                     break
                 fi
                 
-                REMOTE_CMD_ARR=(sshpass -p "$pass_val" ssh "${ssh_base_opts[@]}" "$U@$H")
+                export SSHPASS="$pass_val"   # sshpass -e reads it from the environment, so it never appears in `ps`
+                REMOTE_CMD_ARR=(sshpass -e ssh "${ssh_base_opts[@]}" "$U@$H")
             fi
 
             # --- Test Connection ---
@@ -352,7 +463,7 @@ configure_target() {
              if [ "$method" == "key" ]; then
                  ssh "${ssh_base_opts[@]}" -t -o BatchMode=yes -o IdentitiesOnly=yes -i "$kp" "$U@$H" bash || true
              else
-                 sshpass -p "$pass_val" ssh "${ssh_base_opts[@]}" -t "$U@$H" bash || true
+                 sshpass -e ssh "${ssh_base_opts[@]}" -t "$U@$H" bash || true
              fi
              
              echo
@@ -635,7 +746,9 @@ configure_monitoring() {
 generate_runner() {
     print_header "Generating Runner"
     mkdir -p "$(dirname "$RUN_SCRIPT")"
-    
+    # Create it 0700 *before* any secret is written (no window where it is world-readable).
+    install -m 700 /dev/null "$RUN_SCRIPT"
+
     cat > "$RUN_SCRIPT" <<EOF
 #!/usr/bin/env bash
 # Backsy Runner (Auto-Generated)
@@ -697,7 +810,11 @@ install_backsy() {
     read -r -p "How many targets? [1]: " num
     num=${num:-1}
     for ((i=1; i<=num; i++)); do
-        read -r -p "Target #$i Name: " tname
+        while true; do
+            read -r -p "Target #$i Name: " tname
+            _valid_target_name "$tname" && break
+            print_error "Use 1-64 letters, digits, '.', '_' or '-' (starting with a letter or digit)."
+        done
         configure_target "$tname"
     done
 
@@ -715,6 +832,7 @@ manage_backsy() {
         echo "1) Run Manual Backup"
         echo "2) Manage Cron"
         echo "3) View Logs"
+        echo "4) Trust SSH Host Keys"
         echo "9) Uninstall"
         echo "q) Quit"
         read -r -p "> " opt
@@ -722,6 +840,7 @@ manage_backsy() {
             1) "$RUN_SCRIPT" && print_success "Done" || print_error "Failed"; press_enter ;;
             2) setup_cron; press_enter ;;
             3) tail -n 50 -f "$LOG_FILE";;
+            4) trust_all_remote_hosts; press_enter ;;
             9) uninstall_backsy; exit 0 ;;
             q) exit 0 ;;
             *) ;;
