@@ -2,6 +2,7 @@ import shlex
 import logging
 
 from backuptool.core.config import DatabaseConfig
+from backuptool.utils.compression import Compressor
 
 logger = logging.getLogger(__name__)
 
@@ -64,28 +65,21 @@ class CommandGeneratorMixin:
 
         return cmd, pwd_env_var
 
-    def build_tar_command(self, source_dir: str, archive_path: str, excludes: list, use_pigz: bool, throttle_cmd: str = "") -> str:
+    def build_tar_command(self, source_dir: str, archive_path: str, excludes: list, compressor: Compressor, throttle_cmd: str = "") -> str:
         safe_archive_path = shlex.quote(str(archive_path))
         safe_source_dir = shlex.quote(str(source_dir))
-        
-        archive_filename = str(archive_path).split('/')[-1]
-        root_folder_name = archive_filename.replace(".tar.gz", "")
-        
+
+        root_folder_name = str(archive_path).split('/')[-1].removesuffix(compressor.extension)
+
         transform_expr = f"s,^.,{root_folder_name},S"
         transform_flag = f"--transform={shlex.quote(transform_expr)}"
 
-        exclude_parts = [f"--exclude={shlex.quote(ex)}" for ex in excludes]
-        exclude_str = " ".join(exclude_parts)
+        exclude_str = " ".join(f"--exclude={shlex.quote(ex)}" for ex in excludes)
 
         prefix = f"{throttle_cmd} " if throttle_cmd else ""
-        
-        tar_base = f"{prefix}tar {exclude_str} {transform_flag} -cf - -C {safe_source_dir} ."
 
-        if use_pigz:
-            cmd = f"{tar_base} | {prefix}pigz -6 > {safe_archive_path}"
-        else:
-            # Same level as the pigz branch, so archive size doesn't depend on whether pigz
-            # is installed. Level 6 is ~4x faster than level 9 for ~1% larger output.
-            cmd = f'{prefix}tar {exclude_str} {transform_flag} --use-compress-program="gzip -6" -cf {safe_archive_path} -C {safe_source_dir} .'
-
-        return cmd
+        # tar runs the compressor itself, so a failing compressor (or a tar read error) is
+        # reflected in tar's exit status - unlike `tar | compressor > file`, where only the
+        # last command's status survives. The compressor inherits nice/ionice from tar.
+        compress_flag = f"--use-compress-program={shlex.quote(compressor.program)}"
+        return f"{prefix}tar {exclude_str} {transform_flag} {compress_flag} -cf {safe_archive_path} -C {safe_source_dir} ."

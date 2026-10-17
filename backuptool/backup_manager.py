@@ -57,7 +57,7 @@ class BackupManager:
         targets = []
         for name, target_config in self.config.targets.items():
             logger.info(f"Initializing target '{name}' of type '{target_config.type}'")
-            targets.append(target_map[target_config.type](name, target_config, self.tmp_dir))
+            targets.append(target_map[target_config.type](name, target_config, self.tmp_dir, self.config.compression))
         return targets
 
     def _initialize_destinations(self) -> dict[str, BaseDestination]:

@@ -119,10 +119,24 @@ class ServicesConfig(_Model):
 class MonitoringConfig(_Model):
     healthcheck_url: Optional[str] = None
 
+class CompressionConfig(_Model):
+    algorithm: Literal['gzip', 'zstd'] = 'gzip'
+    level: Optional[int] = None      # gzip: 1-9 (default 6) | zstd: 1-19 (default 3)
+    threads: int = Field(default=0, ge=0)   # zstd only; 0 = use all cores
+
+    @model_validator(mode='after')
+    def check_level(self):
+        if self.level is not None:
+            low, high = (1, 9) if self.algorithm == 'gzip' else (1, 19)
+            if not low <= self.level <= high:
+                raise ValueError(f"compression.level for {self.algorithm} must be between {low} and {high}.")
+        return self
+
 class AppConfig(_Model):
     targets: Dict[str, TargetConfig]
     services: ServicesConfig
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
+    compression: CompressionConfig = Field(default_factory=CompressionConfig)
 
     @field_validator('targets')
     @classmethod

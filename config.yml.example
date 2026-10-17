@@ -63,6 +63,16 @@ targets:
       password: ${REMOTE_DB_PASSWORD}
 
 # -------------------------------------------------------------------
+# COMPRESSION (optional): gzip (default; uses pigz when installed) or zstd (much faster).
+# zstd must be installed on this server and on every remote target; a server without it
+# falls back to gzip for that target (the archive is then named .tar.gz instead of .tar.zst).
+# -------------------------------------------------------------------
+compression:
+  algorithm: gzip        # gzip | zstd
+  # level: 3             # gzip: 1-9 (default 6) | zstd: 1-19 (default 3)
+  # threads: 0           # zstd only: 0 = use all cores
+
+# -------------------------------------------------------------------
 # SERVICES: Define where to send the final backup archives.
 # -------------------------------------------------------------------
 services:

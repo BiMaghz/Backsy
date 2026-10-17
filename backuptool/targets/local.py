@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from .base import BaseTarget
 from .mixins import CommandGeneratorMixin
+from backuptool.utils.compression import resolve_compressor
 from backuptool.utils.paths import plan_paths
 from backuptool.utils.helpers import SPACE_FACTOR, estimate_size_bytes, has_free_space
 
@@ -87,20 +88,19 @@ class LocalTarget(BaseTarget, CommandGeneratorMixin):
                     _run_rsync(rsync_base_cmd + [str(src), str(dest)])
 
             timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d_%H-%M-%S')
-            archive_name = f"{timestamp}_{self.name}.tar.gz"
+            compressor = resolve_compressor(self.compression, _is_tool_available)
+            archive_name = f"{timestamp}_{self.name}{compressor.extension}"
             archive_path = self.tmp_dir / archive_name
-            
-            use_pigz = _is_tool_available('pigz')
             
             archive_cmd = self.build_tar_command(
                 source_dir=str(target_tmp_dir),
                 archive_path=str(archive_path),
                 excludes=[],
-                use_pigz=use_pigz,
+                compressor=compressor,
                 throttle_cmd=THROTTLE_STR
             )
             
-            logger.info("Creating archive...")
+            logger.info(f"Creating archive ({compressor.name})...")
             subprocess.run(archive_cmd, shell=True, check=True, capture_output=True, text=True)
 
             archive_size_mb = os.path.getsize(archive_path) / (1024 * 1024)

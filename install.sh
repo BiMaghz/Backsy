@@ -144,6 +144,72 @@ trust_all_remote_hosts() {
     done 3<<< "$rows"
 }
 
+# --- Compression (gzip / zstd) ---
+compression_algorithm() {
+    [ -f "$CONFIG_FILE" ] || { echo "gzip"; return 0; }
+    yq eval '.compression.algorithm // "gzip"' "$CONFIG_FILE" 2>/dev/null || echo "gzip"
+}
+
+ensure_zstd() {
+    command -v zstd &>/dev/null && return 0
+    print_warning "zstd not found. Installing..."
+    if ! is_root; then
+        print_error "Root is required to install zstd (e.g. 'apt install zstd')."
+        return 1
+    fi
+    if command -v apt-get &>/dev/null; then
+        apt-get update -qq && apt-get install -y zstd
+    elif command -v dnf &>/dev/null; then
+        dnf install -y zstd
+    elif command -v yum &>/dev/null; then
+        yum install -y zstd
+    elif command -v pacman &>/dev/null; then
+        pacman -Sy --noconfirm zstd
+    else
+        print_error "Could not install zstd automatically. Please install the 'zstd' package manually."
+        return 1
+    fi
+    command -v zstd &>/dev/null
+}
+
+# Remote servers run tar and the compressor themselves: warn when zstd is selected but missing there.
+# Usage: check_remote_zstd HOST COMMAND... (the command runs the given string on the remote host)
+check_remote_zstd() {
+    local host="$1"; shift
+    [ "$(compression_algorithm)" = "zstd" ] || return 0
+    if "$@" "command -v zstd" &>/dev/null; then
+        print_success "zstd is installed on $host."
+    else
+        print_warning "zstd is not installed on $host. Backups of this target will fall back to gzip until you install it (e.g. 'apt install zstd')."
+    fi
+}
+
+configure_compression() {
+    _init_config
+    print_header "Compression"
+    echo "1) gzip - default (uses pigz when installed)"
+    echo "2) zstd - much faster; must be installed on this server and on every remote server"
+    local choice algo="gzip"
+    read -r -p "Choose [1]: " choice
+    if [[ "${choice:-1}" == "2" ]]; then
+        if ensure_zstd; then
+            algo="zstd"
+        else
+            print_warning "Keeping gzip."
+        fi
+    fi
+    export YQ_ALGO="$algo"
+    yq eval -i '.compression.algorithm = strenv(YQ_ALGO)' "$CONFIG_FILE"
+    print_success "Compression set to: $algo"
+}
+
+# The config may have been switched to zstd by hand: make sure this server can honour it.
+ensure_compression_tools() {
+    if [ "$(compression_algorithm)" = "zstd" ]; then
+        ensure_zstd || print_warning "zstd is selected but not installed here; backups will fall back to gzip."
+    fi
+}
+
 # --- Dependency Management ---
 check_dependencies() {
     print_header "Checking Dependencies"
@@ -429,6 +495,7 @@ configure_target() {
             if test_output=$("${REMOTE_CMD_ARR[@]}" "echo ConnectionSuccess" 2>&1); then
                 if [[ "$test_output" == *"ConnectionSuccess"* ]]; then
                     print_success "Connection Established Successfully!"
+                    check_remote_zstd "$H" "${REMOTE_CMD_ARR[@]}"
                     break
                 fi
             fi
@@ -807,6 +874,7 @@ install_backsy() {
     "${VENV_DIR}/bin/pip" install --no-cache-dir -r requirements.txt
 
     print_header "Wizard"
+    configure_compression
     read -r -p "How many targets? [1]: " num
     num=${num:-1}
     for ((i=1; i<=num; i++)); do
@@ -826,6 +894,7 @@ install_backsy() {
 }
 
 manage_backsy() {
+    ensure_compression_tools
     while true; do
         clear
         print_header "Backsy Manager"
@@ -833,6 +902,7 @@ manage_backsy() {
         echo "2) Manage Cron"
         echo "3) View Logs"
         echo "4) Trust SSH Host Keys"
+        echo "5) Change Compression (gzip/zstd)"
         echo "9) Uninstall"
         echo "q) Quit"
         read -r -p "> " opt
@@ -841,6 +911,7 @@ manage_backsy() {
             2) setup_cron; press_enter ;;
             3) tail -n 50 -f "$LOG_FILE";;
             4) trust_all_remote_hosts; press_enter ;;
+            5) configure_compression; press_enter ;;
             9) uninstall_backsy; exit 0 ;;
             q) exit 0 ;;
             *) ;;

@@ -8,6 +8,7 @@ from .base import BaseTarget
 from .mixins import CommandGeneratorMixin
 from backuptool.core.config import KNOWN_HOSTS_PATH
 from backuptool.utils.helpers import SPACE_FACTOR, sum_du_output
+from backuptool.utils.compression import resolve_compressor
 from backuptool.utils.paths import plan_paths
 import paramiko
 from fabric import Connection
@@ -177,17 +178,20 @@ class RemoteTarget(BaseTarget, CommandGeneratorMixin):
 
                     self._stage_paths(c, remote_staging_dir, exclude_args)
 
-                    archive_name = f"{timestamp}_{self.name}.tar.gz"
+                    compressor = resolve_compressor(
+                        self.compression,
+                        lambda tool: c.run(f"command -v {tool}", hide=True, warn=True).ok,
+                        where=str(self.config.host),
+                    )
+                    archive_name = f"{timestamp}_{self.name}{compressor.extension}"
                     # Sibling of the staging dir (inside the private work dir), so tar never packs itself.
                     remote_archive_path = f"{remote_work_dir}/{archive_name}"
 
-                    use_pigz = c.run("command -v pigz", hide=True, warn=True).ok
-                    
                     archive_cmd = self.build_tar_command(
                         source_dir=remote_staging_dir,
                         archive_path=remote_archive_path,
                         excludes=[],  # already applied by rsync
-                        use_pigz=use_pigz,
+                        compressor=compressor,
                         throttle_cmd=THROTTLE_STR
                     )
                     
