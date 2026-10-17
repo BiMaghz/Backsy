@@ -2,13 +2,17 @@ import requests
 import os
 from pathlib import Path
 from backuptool.utils.helpers import retry, split_file, cleanup_files
-from .base import BaseDestination
+from backuptool.core.config import CloudflareConfig
+from .base import BaseDestination, SendResult
 
 class CloudflareDestination(BaseDestination):
-    def __init__(self, config: dict, killer=None):
+    config_model = CloudflareConfig
+    produces_link = True
+
+    def __init__(self, config: CloudflareConfig | dict, killer=None):
         super().__init__('Cloudflare', config, killer)
-        self.worker_url = self.config['worker_url']
-        self.api_token = self.config.get('api_token')
+        self.worker_url = self.config.worker_url
+        self.api_token = self.config.api_token
         if not self.api_token:
             self.logger.warning("No 'api_token' configured. The worker now rejects uploads unless its API_TOKEN secret is set and sent.")
         # The worker (and KV) cap a request at 25 MiB *including* multipart framing,
@@ -34,7 +38,7 @@ class CloudflareDestination(BaseDestination):
             raise RuntimeError(f"Worker accepted '{part_path.name}' but returned no download token.")
         return token
 
-    def send(self, archive_path: Path, base_caption: str) -> bool | str:
+    def _send(self, archive_path: Path, base_caption: str, link_caption: str = "") -> SendResult:
         self.logger.info(f"Processing backup for {self.name}...")
         file_size_mb = os.path.getsize(archive_path) / (1024 * 1024)
 
@@ -46,7 +50,7 @@ class CloudflareDestination(BaseDestination):
             files_to_send = split_file(archive_path, self.max_size_mb)
             if not files_to_send:
                 self.logger.error("File splitting failed. Aborting Cloudflare upload.")
-                return False
+                return SendResult(False, detail="could not split the archive")
             is_split = True
         else:
             files_to_send.append(archive_path)
@@ -58,7 +62,7 @@ class CloudflareDestination(BaseDestination):
 
                 if self.killer and self.killer.kill_now:
                     self.logger.warning("Upload interrupted by signal. Aborting Cloudflare upload.")
-                    return False
+                    return SendResult(False, detail="interrupted by signal")
 
                 part_num = i + 1
                 self.logger.info(f"Uploading part {part_num}/{total_parts} to {self.name}...")
@@ -74,11 +78,7 @@ class CloudflareDestination(BaseDestination):
                 self.logger.info(f"Part {part_num} uploaded. Download token: {token}")
 
             self.logger.info(f"Successfully uploaded all parts to {self.name}.")
-            return "\n" + "\n".join(download_links)
-
-        except (requests.exceptions.RequestException, RuntimeError) as e:
-            self.logger.error(f"Error during {self.name} upload: {e}")
-            raise
+            return SendResult(True, link="\n" + "\n".join(download_links))
         finally:
             if is_split:
                 cleanup_files(files_to_send)

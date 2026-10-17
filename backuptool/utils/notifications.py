@@ -2,6 +2,7 @@ import logging
 import os
 import requests
 
+from backuptool.core.config import AppConfig
 from backuptool.core.redact import redact
 
 logger = logging.getLogger(__name__)
@@ -26,7 +27,7 @@ def _send_to_telegram(message: str, token: str, chat_id: str, topic_id: str | No
     except Exception as e:
         logger.error(f"Failed to send failure notification to Telegram: {e}")
 
-def send_fatal_alert(message: str, config: dict | None = None):
+def send_fatal_alert(message: str, config: AppConfig | None = None):
     """
     Sends a fatal error alert to configured and enabled notification services.
     Telegram credentials are taken from the loaded config first (so alerts work
@@ -36,12 +37,12 @@ def send_fatal_alert(message: str, config: dict | None = None):
     """
     logger.info("A fatal error was caught. Attempting to send notifications...")
 
-    tg_config = (config or {}).get('services', {}).get('telegram', {}) if config else {}
-    telegram_enabled = tg_config.get('enable', False) if config is not None else True
+    tg_config = config.services.telegram if config is not None else None
+    telegram_enabled = tg_config.enable if tg_config is not None else True
 
-    tg_token = tg_config.get('token') or os.getenv("TELEGRAM_TOKEN")
-    tg_chat_id = tg_config.get('chat_id') or os.getenv("TELEGRAM_CHAT_ID")
-    tg_topic_id = tg_config.get('topic_id') or os.getenv("TELEGRAM_TOPIC_ID")
+    tg_token = (tg_config.token if tg_config else None) or os.getenv("TELEGRAM_TOKEN")
+    tg_chat_id = (tg_config.chat_id if tg_config else None) or os.getenv("TELEGRAM_CHAT_ID")
+    tg_topic_id = (tg_config.topic_id if tg_config else None) or os.getenv("TELEGRAM_TOPIC_ID")
 
     should_send_telegram = bool(tg_token and tg_chat_id and telegram_enabled)
 

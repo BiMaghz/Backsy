@@ -1,11 +1,13 @@
 import shlex
 import logging
 
+from backuptool.core.config import DatabaseConfig
+
 logger = logging.getLogger(__name__)
 
 class CommandGeneratorMixin:
 
-    def build_db_dump_command(self, db_config: dict, output_path: str) -> tuple[str, str] | None:
+    def build_db_dump_command(self, db_config: DatabaseConfig, output_path: str) -> tuple[str, str] | None:
         """
         Returns (cmd, pwd_env_var). The password itself is never interpolated
         into `cmd` — callers must supply it at execution time via the named
@@ -13,14 +15,14 @@ class CommandGeneratorMixin:
         Embedding it directly in the command string would leak it in plaintext
         to any local user via `ps`/`/proc/<pid>/cmdline` for the dump's duration.
         """
-        db_type = db_config.get('type', '').lower()
-        container = db_config.get('container')
+        db_type = (db_config.type or '').lower()
+        container = db_config.container
 
-        db_host = db_config.get('host')
-        db_port = db_config.get('port')
+        db_host = db_config.host
+        db_port = db_config.port
 
-        name = shlex.quote(db_config['name'])
-        user = shlex.quote(db_config['user'])
+        name = shlex.quote(db_config.name)
+        user = shlex.quote(db_config.user)
         output = shlex.quote(str(output_path))
         container_safe = shlex.quote(container) if container else ""
 

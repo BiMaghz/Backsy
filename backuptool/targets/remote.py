@@ -19,8 +19,8 @@ THROTTLE_STR = "nice -n 15 ionice -c 3"
 class RemoteTarget(BaseTarget, CommandGeneratorMixin):
     def _connection(self, connect_kwargs: dict) -> Connection:
         conn = Connection(
-            host=self.config['host'], user=self.config.get('user', 'root'),
-            port=self.config.get('port', 22), connect_kwargs=connect_kwargs
+            host=self.config.host, user=self.config.user or 'root',
+            port=self.config.port, connect_kwargs=connect_kwargs
         )
         # Fabric's default silently accepts unknown host keys. Verify against known hosts
         # (~/.ssh/known_hosts plus our own file) and refuse anything unrecognised, otherwise
@@ -63,7 +63,7 @@ class RemoteTarget(BaseTarget, CommandGeneratorMixin):
 
     def _estimate_remote_size(self, c, exclude_args: str) -> int | None:
         """Size of the configured paths on the remote host (excludes honoured); None if unknown."""
-        plans, _ = plan_paths(self.config.get('paths', []))
+        plans, _ = plan_paths(self.config.paths)
         if not plans:
             return 0
         sources = " ".join(shlex.quote(p.src) for p in plans)
@@ -89,12 +89,12 @@ class RemoteTarget(BaseTarget, CommandGeneratorMixin):
                 fresh.run(cmd, hide=True)
         except Exception as e:
             logger.error(
-                f"Could not remove '{path}' on {self.config['host']}: {e}. "
+                f"Could not remove '{path}' on {self.config.host}: {e}. "
                 f"It may contain plaintext backup data - remove it manually."
             )
 
     def _stage_paths(self, c, staging_dir: str, exclude_args: str) -> None:
-        plans, notes = plan_paths(self.config.get('paths', []))
+        plans, notes = plan_paths(self.config.paths)
         for note in notes:
             logger.warning(note)
 
@@ -129,14 +129,14 @@ class RemoteTarget(BaseTarget, CommandGeneratorMixin):
         logger.info(f"Executing remote backup for target '{self.name}'...")
         
         connect_kwargs = {}
-        auth_config = self.config.get('auth', {})
-        if auth_config.get('method') == 'key':
-            connect_kwargs['key_filename'] = auth_config.get('key_path')
-        elif auth_config.get('method') == 'password':
-            connect_kwargs['password'] = auth_config.get('password')
+        auth_config = self.config.auth
+        if auth_config.method == 'key':
+            connect_kwargs['key_filename'] = auth_config.key_path
+        elif auth_config.method == 'password':
+            connect_kwargs['password'] = auth_config.password
 
         # Applied while copying, so excluded data (e.g. a DB data dir) is never staged.
-        exclude_args = " ".join(f"--exclude={shlex.quote(ex)}" for ex in self.config.get('exclude', []))
+        exclude_args = " ".join(f"--exclude={shlex.quote(ex)}" for ex in self.config.exclude)
 
         try:
             with self._connection(connect_kwargs) as c:
@@ -160,20 +160,19 @@ class RemoteTarget(BaseTarget, CommandGeneratorMixin):
                     remote_staging_dir = f"{remote_work_dir}/stage"
                     c.run(f"mkdir -m 700 {remote_staging_dir}", hide=True)
 
-                    db_config = self.config.get('database', {})
-                    if db_config.get('enable'):
+                    db_config = self.config.database
+                    if db_config and db_config.enable:
                         logger.info("Remote Docker DB backup is enabled for this target.")
-                        db_type = db_config.get('type', '').lower()
-                        ext = "pgdump" if db_type == 'postgresql' else "sql"
+                        ext = "pgdump" if db_config.type == 'postgresql' else "sql"
                         
-                        dump_filename = f"{db_config['name']}_backup.{ext}"
+                        dump_filename = f"{db_config.name}_backup.{ext}"
                         remote_dump_path = f"{remote_staging_dir}/{dump_filename}"
                         
                         cmd_result = self.build_db_dump_command(db_config, remote_dump_path)
 
                         if cmd_result:
                             cmd, pwd_env_var = cmd_result
-                            self._run_with_password(c, cmd, pwd_env_var, db_config.get('password', ''))
+                            self._run_with_password(c, cmd, pwd_env_var, db_config.password or '')
                             logger.info(f"Remote database dump created in staging directory: {dump_filename}")
 
                     self._stage_paths(c, remote_staging_dir, exclude_args)
@@ -214,17 +213,17 @@ class RemoteTarget(BaseTarget, CommandGeneratorMixin):
 
         except paramiko.BadHostKeyException as e:
             logger.error(
-                f"HOST KEY MISMATCH for {self.config['host']}: the server presented a different key than the one "
+                f"HOST KEY MISMATCH for {self.config.host}: the server presented a different key than the one "
                 f"on record. This can mean a man-in-the-middle attack, or the server was reinstalled. "
                 f"Verify, then update '{KNOWN_HOSTS_PATH}'. ({e})"
             )
             return None
         except paramiko.SSHException as e:
             if "known_hosts" in str(e) or "known hosts" in str(e):
-                port = self.config.get('port', 22)
+                port = self.config.port
                 logger.error(
-                    f"Host key of {self.config['host']} is not trusted yet. Verify its fingerprint, then run: "
-                    f"ssh-keyscan -p {port} {self.config['host']} >> {KNOWN_HOSTS_PATH}  "
+                    f"Host key of {self.config.host} is not trusted yet. Verify its fingerprint, then run: "
+                    f"ssh-keyscan -p {port} {self.config.host} >> {KNOWN_HOSTS_PATH}  "
                     f"(or use 'Trust SSH host keys' in the install.sh manager menu)."
                 )
             else:

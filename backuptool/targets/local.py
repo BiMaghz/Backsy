@@ -37,23 +37,22 @@ class LocalTarget(BaseTarget, CommandGeneratorMixin):
         archive_path = None
         success = False
         try:
-            plans, notes = plan_paths(self.config.get('paths', []))
+            plans, notes = plan_paths(self.config.paths)
             for note in notes:
                 logger.warning(note)
 
             # Scale the disk check to the data actually being backed up (excludes honoured).
             existing = [p.src for p in plans if Path(p.src).exists()]
-            estimate = estimate_size_bytes(existing, self.config.get('exclude', []))
+            estimate = estimate_size_bytes(existing, self.config.exclude)
             if estimate and not has_free_space(self.tmp_dir, int(estimate * SPACE_FACTOR), f"target '{self.name}'"):
                 return None
 
-            db_config = self.config.get('database', {})
-            if db_config.get('enable'):
-                logger.info(f"Starting local DB backup for '{db_config['name']}'...")
+            db_config = self.config.database
+            if db_config and db_config.enable:
+                logger.info(f"Starting local DB backup for '{db_config.name}'...")
                 
-                db_type = db_config.get('type', '').lower()
-                ext = "pgdump" if db_type == 'postgresql' else "sql"
-                dump_file = target_tmp_dir / f"{db_config['name']}_backup.{ext}"
+                ext = "pgdump" if db_config.type == 'postgresql' else "sql"
+                dump_file = target_tmp_dir / f"{db_config.name}_backup.{ext}"
                 
                 cmd_result = self.build_db_dump_command(db_config, str(dump_file))
 
@@ -61,7 +60,7 @@ class LocalTarget(BaseTarget, CommandGeneratorMixin):
                     cmd, pwd_env_var = cmd_result
                     dump_env = os.environ.copy()
                     if pwd_env_var:
-                        dump_env[pwd_env_var] = db_config.get('password', '')
+                        dump_env[pwd_env_var] = db_config.password or ''
                     subprocess.run(cmd, shell=True, check=True, capture_output=True, text=True, env=dump_env)
                     logger.info("Local DB backup completed.")
                 else:
@@ -70,7 +69,7 @@ class LocalTarget(BaseTarget, CommandGeneratorMixin):
             logger.info(f"Syncing local paths for target '{self.name}'...")
             
             rsync_base_cmd = THROTTLE_LIST + ['rsync', '-a']
-            for ex in self.config.get('exclude', []):
+            for ex in self.config.exclude:
                 rsync_base_cmd.append(f"--exclude={ex}")
 
             for plan in plans:

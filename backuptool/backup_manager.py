@@ -13,11 +13,10 @@ from backuptool.targets.base import BaseTarget
 from backuptool.targets.local import LocalTarget
 from backuptool.targets.remote import RemoteTarget
 
-from backuptool.destinations.base import BaseDestination
-from backuptool.destinations.cloudflare import CloudflareDestination
-from backuptool.destinations.telegram import TelegramDestination
-from backuptool.destinations.s3 import S3Destination
+from backuptool.destinations.base import BaseDestination, SendResult
+from backuptool.destinations.registry import DESTINATION_TYPES
 
+from backuptool.core.config import AppConfig
 from backuptool.core.crypto import encrypt_file
 from backuptool.core.signals import GracefulKiller
 from backuptool.core.settings import TMP_DIR
@@ -41,44 +40,33 @@ class TargetResult:
 
 
 class BackupManager:
-    def __init__(self, config: dict, killer: GracefulKiller):
-        self.config = config
+    def __init__(self, config: AppConfig | dict, killer: GracefulKiller):
+        self.config = config if isinstance(config, AppConfig) else AppConfig.model_validate(config)
         self.killer = killer
         self.tmp_dir = DEFAULT_TMP_DIR
-        self.targets_config = config.get('targets', {})
-        self.services_config = config.get('services', {})
         self._encryption_pass = None
 
         self.targets = self._initialize_targets()
         self.destinations = self._initialize_destinations()
 
     def _initialize_targets(self) -> list[BaseTarget]:
-        targets = []
         target_map = {
             'local': LocalTarget,
             'remote': RemoteTarget,
         }
-        for name, config in self.targets_config.items():
-            target_type = config.get('type')
-            if target_type in target_map:
-                logger.info(f"Initializing target '{name}' of type '{target_type}'")
-                targets.append(target_map[target_type](name, config, self.tmp_dir))
-            else:
-                logger.warning(f"Unknown target type '{target_type}' for target '{name}'. Skipping.")
+        targets = []
+        for name, target_config in self.config.targets.items():
+            logger.info(f"Initializing target '{name}' of type '{target_config.type}'")
+            targets.append(target_map[target_config.type](name, target_config, self.tmp_dir))
         return targets
 
     def _initialize_destinations(self) -> dict[str, BaseDestination]:
         destinations = {}
-        dest_map = {
-            'cloudflare': CloudflareDestination,
-            'telegram': TelegramDestination,
-            's3': S3Destination,
-        }
-        for name, config in self.services_config.items():
-            if config.get('enable'):
+        for name, destination_class in DESTINATION_TYPES.items():
+            service_config = getattr(self.config.services, name)
+            if service_config.enable:
                 logger.info(f"Initializing destination: {name}")
-                if name in dest_map:
-                    destinations[name] = dest_map[name](config, self.killer)
+                destinations[name] = destination_class(service_config, self.killer)
         return destinations
 
     def _sweep_tmp_dir(self) -> None:
@@ -109,6 +97,15 @@ class BackupManager:
             logger.error(f"Disk space check failed: Path '{path}' does not exist.")
             return False
 
+    def _deliver(self, name: str, destination: BaseDestination, archive_path: Path,
+                 base_caption: str, link_caption: str) -> SendResult:
+        # Destinations report failures themselves; this only guards against a bug in one of them.
+        try:
+            return destination.send(archive_path, base_caption, link_caption)
+        except Exception as exc:
+            logger.error(f"Destination '{name}' raised unexpectedly: {exc}", exc_info=True)
+            return SendResult(False, detail=f"{type(exc).__name__}: {exc}")
+
     def _send_to_destinations(self, archive_path: Path, target_name: str) -> list[str]:
         """Sends the archive everywhere. Returns the names of destinations that failed."""
         if not self.destinations:
@@ -130,46 +127,33 @@ class BackupManager:
             f"• *Archive SHA256:* `{archive_checksum}`\n"
         )
 
-        link_caption_update = ""
+        # Destinations that produce a download link (Cloudflare, S3 with generate_link) go first,
+        # one at a time, so the link - which only exists after a *successful* upload - can be put
+        # into the captions of the rest. The first link obtained wins; later link-producing
+        # destinations then simply upload in parallel with everyone else.
+        link_caption = ""
+        parallel: dict[str, BaseDestination] = {}
+        for name, destination in self.destinations.items():
+            if destination.produces_link and not link_caption:
+                logger.info(f"--- Processing '{name}' first (its link goes into the other captions) ---")
+                result = self._deliver(name, destination, archive_path, base_caption, "")
+                if not result.ok:
+                    failed.append(name)
+                elif result.link:
+                    link_caption = result.link
+            else:
+                parallel[name] = destination
 
-        if 'cloudflare' in self.destinations:
-            logger.info("--- Processing Cloudflare destination sequentially ---")
-            # Guarded: a Cloudflare outage must not stop S3/Telegram from running.
-            try:
-                result = self.destinations['cloudflare'].send(archive_path, base_caption)
-                if isinstance(result, str):
-                    link_caption_update = result
-                elif not result:
-                    failed.append('cloudflare')
-            except Exception as exc:
-                logger.error(f"Destination 'cloudflare' failed: {exc}")
-                failed.append('cloudflare')
-
-        elif 's3' in self.destinations:
-            s3_dest = self.destinations['s3']
-            if not link_caption_update:
-                url = s3_dest.get_presigned_url(archive_path.name)
-                if url:
-                    link_caption_update = f"\n• [S3 Direct Link]({url})"
-                    logger.info("Generated S3 pre-signed URL for caption.")
-
-        other_destinations = {n: d for n, d in self.destinations.items() if n != 'cloudflare'}
-
-        if other_destinations:
-            logger.info(f"--- Processing remaining destinations in parallel: {list(other_destinations.keys())} ---")
-            with concurrent.futures.ThreadPoolExecutor(max_workers=len(other_destinations)) as executor:
-                future_to_dest = {
-                    executor.submit(dest.send, archive_path, base_caption, link_caption_update): name
-                    for name, dest in other_destinations.items()
+        if parallel:
+            logger.info(f"--- Processing remaining destinations in parallel: {list(parallel.keys())} ---")
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(parallel)) as executor:
+                futures = {
+                    executor.submit(self._deliver, name, destination, archive_path, base_caption, link_caption): name
+                    for name, destination in parallel.items()
                 }
-                for future in concurrent.futures.as_completed(future_to_dest):
-                    dest_name = future_to_dest[future]
-                    try:
-                        if future.result() is False:
-                            failed.append(dest_name)
-                    except Exception as exc:
-                        logger.error(f"Parallel task for '{dest_name}' generated an exception: {exc}")
-                        failed.append(dest_name)
+                for future in concurrent.futures.as_completed(futures):
+                    if not future.result().ok:
+                        failed.append(futures[future])
 
         return failed
 
@@ -227,7 +211,7 @@ class BackupManager:
                     logger.warning(f"Could not clean up archive {path}: {e}")
 
     def _ping_healthcheck(self, ok: bool) -> None:
-        url = self.config.get('monitoring', {}).get('healthcheck_url')
+        url = self.config.monitoring.healthcheck_url
         if not url:
             return
 

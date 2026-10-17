@@ -21,7 +21,7 @@ def main():
     try:
         with FileLock(LOCK_FILE):
             config = load_config()
-            if config.get('services', {}).get('telegram', {}).get('enable'):
+            if config.services.telegram.enable:
                 configure_ip_family()
             manager = BackupManager(config, killer)
             success = manager.run()

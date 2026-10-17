@@ -159,7 +159,7 @@ def _resolve_env_vars(config_data):
 
     return config_data
 
-def load_config() -> dict:
+def load_config() -> AppConfig:
     logger.info(f"Loading configuration from '{CONFIG_PATH}'...")
     try:
         with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
@@ -174,7 +174,7 @@ def load_config() -> dict:
             validated_config = AppConfig(**resolved_config_data)
             logger.info("Configuration loaded and validated successfully.")
             
-            return validated_config.model_dump()
+            return validated_config
             
         except ValidationError as e:
             logger.critical("Configuration Validation Failed:")
