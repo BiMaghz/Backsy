@@ -3,6 +3,7 @@ import os
 import requests
 import concurrent.futures
 import multiprocessing
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime, timezone
@@ -78,6 +79,21 @@ class BackupManager:
                 if name in dest_map:
                     destinations[name] = dest_map[name](config, self.killer)
         return destinations
+
+    def _sweep_tmp_dir(self) -> None:
+        """
+        Removes anything a crashed/killed earlier run left behind (it may hold plaintext data).
+        Safe because main() holds the single-instance lock before the manager runs.
+        """
+        for entry in self.tmp_dir.iterdir():
+            try:
+                if entry.is_dir() and not entry.is_symlink():
+                    shutil.rmtree(entry)
+                else:
+                    entry.unlink()
+                logger.warning(f"Removed leftover from a previous run: {entry.name}")
+            except OSError as e:
+                logger.warning(f"Could not remove leftover '{entry}': {e}")
 
     def _check_disk_space(self, path: Path, required_mb: int = 200) -> bool:
         try:
@@ -251,6 +267,7 @@ class BackupManager:
         """Runs all targets. Returns True only if every target was backed up and delivered."""
         logger.info("Backup process started for all configured targets.")
         ensure_private_dir(self.tmp_dir)
+        self._sweep_tmp_dir()
 
         if not self._check_disk_space(self.tmp_dir):
             return self._finish([TargetResult("(all targets)", False, "low disk space in temp directory")])

@@ -1,10 +1,12 @@
 import io
 import logging
+import posixpath
 import shlex
 from datetime import datetime, timezone
 from pathlib import Path
 from .base import BaseTarget
 from .mixins import CommandGeneratorMixin
+from backuptool.utils.paths import plan_paths
 from fabric import Connection
 
 logger = logging.getLogger(__name__)
@@ -12,6 +14,12 @@ logger = logging.getLogger(__name__)
 THROTTLE_STR = "nice -n 15 ionice -c 3"
 
 class RemoteTarget(BaseTarget, CommandGeneratorMixin):
+    def _connection(self, connect_kwargs: dict) -> Connection:
+        return Connection(
+            host=self.config['host'], user=self.config.get('user', 'root'),
+            port=self.config.get('port', 22), connect_kwargs=connect_kwargs
+        )
+
     def _run_with_password(self, connection, cmd: str, pwd_env_var: str, password: str):
         """
         Runs `cmd` on the remote host, supplying the DB password through the
@@ -43,6 +51,56 @@ class RemoteTarget(BaseTarget, CommandGeneratorMixin):
             logger.warning(f"Could not check remote disk space on '{path}': {e}. Proceeding with caution.")
             return True
 
+    def _remove_remote_dir(self, conn, path: str, connect_kwargs: dict) -> None:
+        """Removes the remote work dir; retries on a fresh connection if the original one died."""
+        cmd = f"rm -rf {shlex.quote(path)}"
+        logger.info("Cleaning up remote temporary files...")
+        try:
+            conn.run(cmd, hide=True)
+            return
+        except Exception as e:
+            logger.warning(f"Remote cleanup over the existing connection failed ({e}); retrying with a new one...")
+        try:
+            with self._connection(connect_kwargs) as fresh:
+                fresh.run(cmd, hide=True)
+        except Exception as e:
+            logger.error(
+                f"Could not remove '{path}' on {self.config['host']}: {e}. "
+                f"It may contain plaintext backup data - remove it manually."
+            )
+
+    def _stage_paths(self, c, staging_dir: str, exclude_args: str) -> None:
+        plans, notes = plan_paths(self.config.get('paths', []))
+        for note in notes:
+            logger.warning(note)
+
+        for plan in plans:
+            q_src = shlex.quote(plan.src)
+            kind = c.run(
+                f"if [ -d {q_src} ]; then echo dir; elif [ -e {q_src} ]; then echo file; else echo missing; fi",
+                hide=True
+            ).stdout.strip()
+            if kind == "missing":
+                logger.warning(f"Remote path not found: {plan.src}")
+                continue
+
+            dest = f"{staging_dir}/{plan.dest}"
+            if kind == "dir":
+                # Trailing slashes: copy the directory's *contents* to exactly `dest`.
+                src_arg, dest_arg = plan.src + "/", dest + "/"
+            else:
+                src_arg, dest_arg = plan.src, dest
+
+            result = c.run(
+                f"mkdir -p {shlex.quote(posixpath.dirname(dest))} && "
+                f"{THROTTLE_STR} rsync -a {exclude_args} {shlex.quote(src_arg)} {shlex.quote(dest_arg)}",
+                hide=True, warn=True
+            )
+            if result.exited == 24:
+                logger.warning(f"rsync: some files vanished during transfer ({plan.src}). Continuing.")
+            elif result.exited != 0:
+                raise RuntimeError(f"rsync failed for '{plan.src}' (exit {result.exited}): {result.stderr.strip()}")
+
     def execute(self) -> Path | None:
         logger.info(f"Executing remote backup for target '{self.name}'...")
         
@@ -53,13 +111,11 @@ class RemoteTarget(BaseTarget, CommandGeneratorMixin):
         elif auth_config.get('method') == 'password':
             connect_kwargs['password'] = auth_config.get('password')
 
-        remote_cleanup_paths = []
-        
+        # Applied while copying, so excluded data (e.g. a DB data dir) is never staged.
+        exclude_args = " ".join(f"--exclude={shlex.quote(ex)}" for ex in self.config.get('exclude', []))
+
         try:
-            with Connection(
-                host=self.config['host'], user=self.config.get('user', 'root'),
-                port=self.config.get('port', 22), connect_kwargs=connect_kwargs
-            ) as c:
+            with self._connection(connect_kwargs) as c:
                 logger.info(f"Successfully connected to {c.host}")
                 
                 if not self._check_remote_space(c, "/tmp", required_mb=500):
@@ -69,72 +125,65 @@ class RemoteTarget(BaseTarget, CommandGeneratorMixin):
                 # mktemp -d creates an unpredictable directory with mode 0700, so the staged
                 # data and the archive are never readable by other users on the remote host.
                 remote_work_dir = c.run("mktemp -d /tmp/backsy.XXXXXXXX", hide=True).stdout.strip()
-                remote_cleanup_paths.append(remote_work_dir)
-                remote_staging_dir = f"{remote_work_dir}/stage"
-                c.run(f"mkdir -m 700 {remote_staging_dir}", hide=True)
-                
-                db_config = self.config.get('database', {})
-                if db_config.get('enable'):
-                    logger.info("Remote Docker DB backup is enabled for this target.")
-                    db_type = db_config.get('type', '').lower()
-                    ext = "pgdump" if db_type == 'postgresql' else "sql"
+                if not remote_work_dir.startswith("/tmp/backsy."):
+                    raise RuntimeError(f"Unexpected mktemp output: {remote_work_dir!r}")
+
+                try:
+                    remote_staging_dir = f"{remote_work_dir}/stage"
+                    c.run(f"mkdir -m 700 {remote_staging_dir}", hide=True)
+
+                    db_config = self.config.get('database', {})
+                    if db_config.get('enable'):
+                        logger.info("Remote Docker DB backup is enabled for this target.")
+                        db_type = db_config.get('type', '').lower()
+                        ext = "pgdump" if db_type == 'postgresql' else "sql"
+                        
+                        dump_filename = f"{db_config['name']}_backup.{ext}"
+                        remote_dump_path = f"{remote_staging_dir}/{dump_filename}"
+                        
+                        cmd_result = self.build_db_dump_command(db_config, remote_dump_path)
+
+                        if cmd_result:
+                            cmd, pwd_env_var = cmd_result
+                            self._run_with_password(c, cmd, pwd_env_var, db_config.get('password', ''))
+                            logger.info(f"Remote database dump created in staging directory: {dump_filename}")
+
+                    self._stage_paths(c, remote_staging_dir, exclude_args)
+
+                    archive_name = f"{timestamp}_{self.name}.tar.gz"
+                    # Sibling of the staging dir (inside the private work dir), so tar never packs itself.
+                    remote_archive_path = f"{remote_work_dir}/{archive_name}"
+
+                    use_pigz = c.run("command -v pigz", hide=True, warn=True).ok
                     
-                    dump_filename = f"{db_config['name']}_backup.{ext}"
-                    remote_dump_path = f"{remote_staging_dir}/{dump_filename}"
+                    archive_cmd = self.build_tar_command(
+                        source_dir=remote_staging_dir,
+                        archive_path=remote_archive_path,
+                        excludes=[],  # already applied by rsync
+                        use_pigz=use_pigz,
+                        throttle_cmd=THROTTLE_STR
+                    )
                     
-                    cmd_result = self.build_db_dump_command(db_config, remote_dump_path)
+                    logger.info("Running remote command to create archive.")
+                    c.run(archive_cmd, hide=True)
 
-                    if cmd_result:
-                        cmd, pwd_env_var = cmd_result
-                        self._run_with_password(c, cmd, pwd_env_var, db_config.get('password', ''))
-                        logger.info(f"Remote database dump created in staging directory: {dump_filename}")
+                    size_result = c.run(f"stat -c %s {shlex.quote(remote_archive_path)}", hide=True)
+                    remote_size_bytes = int(size_result.stdout.strip())
+                    remote_size_mb = remote_size_bytes / (1024 * 1024)
 
-                for path_entry in self.config.get('paths', []):
-                    if ':' in path_entry:
-                        src, alias = path_entry.split(':', 1)
-                        dest = f"{remote_staging_dir}/{shlex.quote(alias)}"
-                        c.run(f"mkdir -p {dest}", hide=True)
-                        c.run(f"{THROTTLE_STR} rsync -a {shlex.quote(src)} {dest}", hide=True, warn=True)
-                    else:
-                        c.run(f"{THROTTLE_STR} rsync -aR {shlex.quote(path_entry)} {remote_staging_dir}/", hide=True, warn=True)
+                    local_archive_path = self.tmp_dir / archive_name
+                    logger.info(f"Downloading archive ({remote_size_mb:.2f} MB) from {c.host}:{remote_archive_path}")
+                    try:
+                        c.get(remote_archive_path, str(local_archive_path))
+                    except Exception:
+                        local_archive_path.unlink(missing_ok=True)  # no partial download left behind
+                        raise
 
-                archive_name = f"{timestamp}_{self.name}.tar.gz"
-                # Sibling of the staging dir (inside the private work dir), so tar never packs itself.
-                remote_archive_path = f"{remote_work_dir}/{archive_name}"
-
-                use_pigz = c.run("command -v pigz", hide=True, warn=True).ok
-                
-                archive_cmd = self.build_tar_command(
-                    source_dir=remote_staging_dir,
-                    archive_path=remote_archive_path,
-                    excludes=self.config.get('exclude', []),
-                    use_pigz=use_pigz,
-                    throttle_cmd=THROTTLE_STR
-                )
-                
-                logger.info("Running remote command to create archive.")
-                c.run(archive_cmd, hide=True)
-
-                size_result = c.run(f"stat -c %s {shlex.quote(remote_archive_path)}", hide=True)
-                remote_size_bytes = int(size_result.stdout.strip())
-                remote_size_mb = remote_size_bytes / (1024 * 1024)
-
-                local_archive_path = self.tmp_dir / archive_name
-                logger.info(f"Downloading archive ({remote_size_mb:.2f} MB) from {c.host}:{remote_archive_path}")
-                c.get(remote_archive_path, str(local_archive_path))
-
-                logger.info(f"Remote archive downloaded successfully! Size: {remote_size_mb:.2f} MB")
-                return local_archive_path
+                    logger.info(f"Remote archive downloaded successfully! Size: {remote_size_mb:.2f} MB")
+                    return local_archive_path
+                finally:
+                    self._remove_remote_dir(c, remote_work_dir, connect_kwargs)
 
         except Exception as e:
             logger.error(f"Failed to perform remote backup for '{self.name}': {e}", exc_info=True)
             return None
-        finally:
-            if remote_cleanup_paths:
-                logger.info("Cleaning up remote temporary files...")
-                with Connection(
-                    host=self.config['host'], user=self.config.get('user', 'root'),
-                    port=self.config.get('port', 22), connect_kwargs=connect_kwargs
-                ) as c:
-                    for f_path in remote_cleanup_paths:
-                        c.run(f"rm -rf {shlex.quote(f_path)}", hide=True, warn=True)

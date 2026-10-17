@@ -3,12 +3,18 @@ import re
 import yaml
 import logging
 from typing import List, Dict, Optional, Literal
-from pydantic import BaseModel, Field, model_validator, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, model_validator, ValidationError
+
+from backuptool.utils.paths import plan_paths
 
 CONFIG_PATH = "config.yml"
 logger = logging.getLogger(__name__)
 
-class DatabaseConfig(BaseModel):
+class _Model(BaseModel):
+    # Unquoted YAML numbers (chat_id: -100123..., topic_id: 5) are valid for str fields.
+    model_config = ConfigDict(coerce_numbers_to_str=True)
+
+class DatabaseConfig(_Model):
     enable: bool = False
     type: Optional[Literal['mysql', 'mariadb', 'postgresql']] = None
     container: Optional[str] = None
@@ -25,7 +31,7 @@ class DatabaseConfig(BaseModel):
                 raise ValueError("If database is enabled, type, name, user, and password are required.")
         return self
 
-class AuthConfig(BaseModel):
+class AuthConfig(_Model):
     method: Literal['key', 'password']
     key_path: Optional[str] = None
     password: Optional[str] = None
@@ -38,7 +44,7 @@ class AuthConfig(BaseModel):
             raise ValueError("Auth method is 'password' but 'password' is missing.")
         return self
 
-class TargetConfig(BaseModel):
+class TargetConfig(_Model):
     type: Literal['local', 'remote']
     paths: List[str] = Field(default_factory=list)
     exclude: List[str] = Field(default_factory=list)
@@ -56,21 +62,34 @@ class TargetConfig(BaseModel):
                 raise ValueError("Target type is 'remote' but 'host' is missing.")
             if not self.auth:
                 raise ValueError("Target type is 'remote' but 'auth' configuration is missing.")
+        plan_paths(self.paths)  # fail fast on unusable path entries / aliases
         return self
 
-class CloudflareConfig(BaseModel):
+class CloudflareConfig(_Model):
     enable: bool = False
     worker_url: Optional[str] = None
     api_token: Optional[str] = None
 
-class TelegramConfig(BaseModel):
+    @model_validator(mode='after')
+    def check_required(self):
+        if self.enable and not self.worker_url:
+            raise ValueError("Cloudflare is enabled but 'worker_url' is missing.")
+        return self
+
+class TelegramConfig(_Model):
     enable: bool = False
     token: Optional[str] = None
     chat_id: Optional[str] = None
     topic_id: Optional[str] = None
     send_file: bool = True
 
-class S3Config(BaseModel):
+    @model_validator(mode='after')
+    def check_required(self):
+        if self.enable and not (self.token and self.chat_id):
+            raise ValueError("Telegram is enabled but 'token' and/or 'chat_id' is missing.")
+        return self
+
+class S3Config(_Model):
     enable: bool = False
     endpoint_url: Optional[str] = None
     bucket_name: Optional[str] = None
@@ -79,39 +98,47 @@ class S3Config(BaseModel):
     region_name: Optional[str] = None
     generate_link: bool  = False
 
-class ServicesConfig(BaseModel):
+    @model_validator(mode='after')
+    def check_required(self):
+        if self.enable and not all([self.bucket_name, self.access_key, self.secret_key]):
+            raise ValueError("S3 is enabled but 'bucket_name', 'access_key' and/or 'secret_key' is missing.")
+        return self
+
+class ServicesConfig(_Model):
     cloudflare: Optional[CloudflareConfig] = Field(default_factory=lambda: CloudflareConfig(enable=False))
     telegram: Optional[TelegramConfig] = Field(default_factory=lambda: TelegramConfig(enable=False))
     s3: Optional[S3Config] = Field(default_factory=lambda: S3Config(enable=False))
 
-class MonitoringConfig(BaseModel):
+class MonitoringConfig(_Model):
     healthcheck_url: Optional[str] = None
 
-class AppConfig(BaseModel):
+class AppConfig(_Model):
     targets: Dict[str, TargetConfig]
     services: ServicesConfig
     monitoring: MonitoringConfig = Field(default_factory=MonitoringConfig)
 
+_PLACEHOLDER = re.compile(r'\$\{([^}]+)\}')
+
 def _resolve_env_vars(config_data):
     if isinstance(config_data, dict):
+        if config_data.get('enable') is False:
+            return config_data  # disabled section: its placeholders are never used, don't require them
         for key, value in config_data.items():
             config_data[key] = _resolve_env_vars(value)
     elif isinstance(config_data, list):
         for i, item in enumerate(config_data):
             config_data[i] = _resolve_env_vars(item)
     elif isinstance(config_data, str):
-        placeholder_pattern = re.compile(r'\$\{([^}]+)\}')
-        match = placeholder_pattern.search(config_data)
-        
-        if match:
+        def _substitute(match):
             var_name = match.group(1)
             var_value = os.getenv(var_name)
             if var_value is None:
                 error_msg = f"Environment variable '{var_name}' not found, but is required by the configuration."
                 logger.critical(error_msg)
                 raise ValueError(error_msg)
-            return config_data.replace(match.group(0), var_value)
-            
+            return var_value
+        return _PLACEHOLDER.sub(_substitute, config_data)
+
     return config_data
 
 def load_config() -> dict:

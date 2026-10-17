@@ -18,11 +18,13 @@ def encrypt_file(file_path: Path, password: str) -> Path | None:
     # --passphrase-fd 0: Read password from stdin (Secure)
     # --symmetric: Use symmetric encryption
     # --cipher-algo AES256: Use strong encryption standard
+    # --compress-algo none: input is already gzip-compressed; recompressing only burns CPU
     cmd = [
         "gpg", "--batch", "--yes",
         "--passphrase-fd", "0",
         "--symmetric",
         "--cipher-algo", "AES256",
+        "--compress-algo", "none",
         "-o", str(encrypted_path),
         str(file_path)
     ]
@@ -42,11 +44,14 @@ def encrypt_file(file_path: Path, password: str) -> Path | None:
             return encrypted_path
         else:
             logger.error("Encryption failed: Output file is empty or missing.")
+            encrypted_path.unlink(missing_ok=True)
             return None
 
     except subprocess.CalledProcessError as e:
         logger.error(f"GPG encryption failed: {e.stderr.decode().strip()}")
+        encrypted_path.unlink(missing_ok=True)  # don't leave a truncated ciphertext behind
         return None
     except Exception as e:
         logger.error(f"Unexpected error during encryption: {e}")
+        encrypted_path.unlink(missing_ok=True)
         return None

@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from .base import BaseTarget
 from .mixins import CommandGeneratorMixin
+from backuptool.utils.paths import plan_paths
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +15,14 @@ THROTTLE_STR = "nice -n 15 ionice -c 3"
 
 def _is_tool_available(name: str) -> bool:
     return shutil.which(name) is not None
+
+def _run_rsync(cmd: list[str]) -> None:
+    """Exit 24 (source files vanished mid-transfer) is normal on live systems: warn only."""
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode == 24:
+        logger.warning(f"rsync: some files vanished during transfer ({cmd[-2]}). Continuing.")
+    elif result.returncode != 0:
+        raise subprocess.CalledProcessError(result.returncode, cmd, result.stdout, result.stderr)
 
 class LocalTarget(BaseTarget, CommandGeneratorMixin):
 
@@ -24,6 +33,8 @@ class LocalTarget(BaseTarget, CommandGeneratorMixin):
             shutil.rmtree(target_tmp_dir)
         target_tmp_dir.mkdir(parents=True)
 
+        archive_path = None
+        success = False
         try:
             db_config = self.config.get('database', {})
             if db_config.get('enable'):
@@ -50,26 +61,24 @@ class LocalTarget(BaseTarget, CommandGeneratorMixin):
             rsync_base_cmd = THROTTLE_LIST + ['rsync', '-a']
             for ex in self.config.get('exclude', []):
                 rsync_base_cmd.append(f"--exclude={ex}")
-            
-            for path_entry in self.config.get('paths', []):
-                if ':' in path_entry:
-                    src_str, alias = path_entry.split(':', 1)
-                    src = Path(src_str)
-                    dest = target_tmp_dir / alias
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    
-                    if src.exists():
-                        subprocess.run(rsync_base_cmd + [str(src), str(dest)], check=True)
-                    else:
-                        logger.warning(f"Local path not found: {src}")
+
+            plans, notes = plan_paths(self.config.get('paths', []))
+            for note in notes:
+                logger.warning(note)
+
+            for plan in plans:
+                src = Path(plan.src)
+                if not src.exists():
+                    logger.warning(f"Local path not found: {src}")
+                    continue
+
+                dest = target_tmp_dir / plan.dest
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                if src.is_dir():
+                    # Trailing slashes: copy the directory's *contents* to exactly `dest`.
+                    _run_rsync(rsync_base_cmd + [f"{src}/", f"{dest}/"])
                 else:
-                    src = Path(path_entry)
-                    if src.exists():
-                        cmd_with_rel = list(rsync_base_cmd)
-                        cmd_with_rel.append('-R')
-                        subprocess.run(cmd_with_rel + [str(src), str(target_tmp_dir)], check=True)
-                    else:
-                        logger.warning(f"Local path not found: {src}")
+                    _run_rsync(rsync_base_cmd + [str(src), str(dest)])
 
             timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d_%H-%M-%S')
             archive_name = f"{timestamp}_{self.name}.tar.gz"
@@ -90,6 +99,7 @@ class LocalTarget(BaseTarget, CommandGeneratorMixin):
 
             archive_size_mb = os.path.getsize(archive_path) / (1024 * 1024)
             logger.info(f"Local archive created successfully! Size: {archive_size_mb:.2f} MB")
+            success = True
             return archive_path
 
         except subprocess.CalledProcessError as e:
@@ -110,3 +120,5 @@ class LocalTarget(BaseTarget, CommandGeneratorMixin):
             if target_tmp_dir.exists():
                 shutil.rmtree(target_tmp_dir)
                 logger.info(f"Cleaned up temporary directory: {target_tmp_dir}")
+            if not success and archive_path is not None:
+                archive_path.unlink(missing_ok=True)  # never leave a partial archive behind

@@ -80,11 +80,10 @@ class CommandGeneratorMixin:
         tar_base = f"{prefix}tar {exclude_str} {transform_flag} -cf - -C {safe_source_dir} ."
 
         if use_pigz:
-            cmd = f"{tar_base} | {prefix}pigz -9 > {safe_archive_path}"
+            cmd = f"{tar_base} | {prefix}pigz -6 > {safe_archive_path}"
         else:
-            # Match pigz's -9 level explicitly; plain `-z` defaults to gzip's
-            # level 6, which would make archive size depend on whether pigz
-            # happens to be installed.
-            cmd = f'{prefix}tar {exclude_str} {transform_flag} --use-compress-program="gzip -9" -cf {safe_archive_path} -C {safe_source_dir} .'
+            # Same level as the pigz branch, so archive size doesn't depend on whether pigz
+            # is installed. Level 6 is ~4x faster than level 9 for ~1% larger output.
+            cmd = f'{prefix}tar {exclude_str} {transform_flag} --use-compress-program="gzip -6" -cf {safe_archive_path} -C {safe_source_dir} .'
 
         return cmd

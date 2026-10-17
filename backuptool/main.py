@@ -8,6 +8,9 @@ from backuptool.core.locking import FileLock, LockExistsError
 from backuptool.core.signals import GracefulKiller
 from backuptool.utils.notifications import send_fatal_alert
 
+# /run is root-only and cleared on boot (unlike the world-writable /tmp).
+LOCK_FILE = "/run/Backsy.lock"
+
 def main():
     # Everything we create (dumps, archives, lock, logs) is private to the owner by default.
     os.umask(0o077)
@@ -17,7 +20,7 @@ def main():
     success = False
 
     try:
-        with FileLock("/tmp/Backsy.lock", exit_on_lock=True):
+        with FileLock(LOCK_FILE):
             config = load_config()
             manager = BackupManager(config, killer)
             success = manager.run()

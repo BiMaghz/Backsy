@@ -332,7 +332,7 @@ configure_target() {
     # Paths
     print_info "Enter paths to backup one by one."
     print_info "Press 'Enter' on an empty line to finish."
-    print_info "Tip: Use ':' to rename a path inside the backup."
+    print_info "Tip: Use 'path:folder' to store a path under folder/ inside the backup."
     
     if [ "$target_type" == "remote" ]; then
         print_info "Tip: Type 'explore' to open a temporary shell on the server to find paths."

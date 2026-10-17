@@ -9,7 +9,8 @@ targets:
   Main_Server:
     type: local
 
-    # Paths to include: (use ':' to rename, can be empty [])
+    # Paths to include (can be empty []). Use 'path:folder' to store it under 'folder/' in the archive;
+    # entries that would collide there are kept under their full path instead.
     paths:
       - "/etc/opt/marzneshin:data"
       - "/var/lib/marznode:data"
