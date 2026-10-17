@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from backuptool.utils.paths import plan_paths
 
-CONFIG_PATH = "config.yml"
+from backuptool.core.settings import CONFIG_PATH
 # SSH host keys that remote targets are verified against (lives next to config.yml).
 KNOWN_HOSTS_PATH = Path(CONFIG_PATH).resolve().parent / "known_hosts"
 # Target names end up in file names, archive names and S3 keys.
@@ -34,6 +34,8 @@ class DatabaseConfig(_Model):
         if self.enable:
             if not all([self.type, self.name, self.user, self.password]):
                 raise ValueError("If database is enabled, type, name, user, and password are required.")
+            if self.container and self.host:
+                raise ValueError("Database: set either 'container' or 'host', not both (they are mutually exclusive).")
         return self
 
 class AuthConfig(_Model):

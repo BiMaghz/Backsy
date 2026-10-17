@@ -20,6 +20,7 @@ from backuptool.destinations.s3 import S3Destination
 
 from backuptool.core.crypto import encrypt_file
 from backuptool.core.signals import GracefulKiller
+from backuptool.core.settings import TMP_DIR
 
 from backuptool.utils.helpers import calculate_checksum, ensure_private_dir
 from backuptool.utils.notifications import send_fatal_alert
@@ -28,8 +29,8 @@ logger = logging.getLogger(__name__)
 
 # Private (0700) working directory for plaintext dumps/archives. Deliberately not
 # under /tmp: /tmp is world-writable (symlink/squatting risk for a root process)
-# and is often a RAM-backed tmpfs.
-DEFAULT_TMP_DIR = Path("/var/lib/Backsy/tmp")
+# and is often a RAM-backed tmpfs. Override with BACKSY_TMP_DIR (see core/settings.py).
+DEFAULT_TMP_DIR = TMP_DIR
 
 
 @dataclass

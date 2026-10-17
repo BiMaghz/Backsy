@@ -34,6 +34,41 @@ def ensure_private_dir(path: Path) -> None:
     if st.st_mode & 0o077:
         os.chmod(path, 0o700)
 
+# Peak local usage for a target is the staged copy plus the archive built from it (the staging
+# copy is deleted before encryption). Archives are normally smaller than their sources, so 1.5x.
+SPACE_FACTOR = 1.5
+
+def sum_du_output(output: str) -> int:
+    """Sums the byte counts in `du -sb` output (lines of '<bytes>\t<path>')."""
+    total = 0
+    for line in output.splitlines():
+        fields = line.split(None, 1)
+        if fields and fields[0].isdigit():
+            total += int(fields[0])
+    return total
+
+def estimate_size_bytes(paths: list[str], excludes: list[str]) -> int | None:
+    """Size of `paths` honouring `excludes`; None if it cannot be determined (no `du`)."""
+    if not paths:
+        return 0
+    cmd = ["du", "-sb", *[f"--exclude={e}" for e in excludes], "--", *paths]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError:
+        return None
+    # du exits 1 when some entries are unreadable but still reports everything else.
+    return sum_du_output(result.stdout)
+
+def has_free_space(path: Path, required_bytes: int, label: str) -> bool:
+    free = shutil.disk_usage(path).free
+    if free < required_bytes:
+        logger.error(
+            f"Not enough disk space for {label}: {free / 1024**2:.0f} MB free in '{path}', "
+            f"about {required_bytes / 1024**2:.0f} MB needed."
+        )
+        return False
+    return True
+
 def calculate_checksum(file_path: str) -> str:
     sha256_hash = hashlib.sha256()
     try:
@@ -137,7 +172,7 @@ def split_file(file_path: Path, chunk_size_mb: int) -> list[Path]:
     ]
     
     try:
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
         
         parts = sorted(list(chunk_dir.glob(f"{file_path.name}.part-*")))
         logger.info(f"Successfully split '{file_path.name}' into {len(parts)} parts.")
@@ -145,9 +180,11 @@ def split_file(file_path: Path, chunk_size_mb: int) -> list[Path]:
     except subprocess.CalledProcessError as e:
         logger.error(f"Failed to split file '{file_path.name}'. Return code: {e.returncode}")
         logger.error(f"Stderr: {e.stderr.strip()}")
+        shutil.rmtree(chunk_dir, ignore_errors=True)
         return []
     except FileNotFoundError as e:
         logger.error(f"Failed to run split command: {e}")
+        shutil.rmtree(chunk_dir, ignore_errors=True)
         return []
 
 def cleanup_files(file_parts: list[Path]):

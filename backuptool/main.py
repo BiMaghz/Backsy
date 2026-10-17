@@ -5,11 +5,10 @@ from backuptool.core.logger import setup_logging
 from backuptool.core.config import load_config
 from backuptool.backup_manager import BackupManager
 from backuptool.core.locking import FileLock, LockExistsError
+from backuptool.core.network import configure_ip_family
+from backuptool.core.settings import LOCK_FILE
 from backuptool.core.signals import GracefulKiller
 from backuptool.utils.notifications import send_fatal_alert
-
-# /run is root-only and cleared on boot (unlike the world-writable /tmp).
-LOCK_FILE = "/run/Backsy.lock"
 
 def main():
     # Everything we create (dumps, archives, lock, logs) is private to the owner by default.
@@ -22,6 +21,8 @@ def main():
     try:
         with FileLock(LOCK_FILE):
             config = load_config()
+            if config.get('services', {}).get('telegram', {}).get('enable'):
+                configure_ip_family()
             manager = BackupManager(config, killer)
             success = manager.run()
 

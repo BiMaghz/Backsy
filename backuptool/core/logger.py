@@ -5,7 +5,7 @@ from logging.handlers import RotatingFileHandler
 
 from backuptool.core.redact import redact
 
-LOG_FILE = "/var/log/Backsy.log"
+from backuptool.core.settings import LOG_FILE
 MAX_BYTES = 10 * 1024 * 1024
 BACKUP_COUNT = 5
 

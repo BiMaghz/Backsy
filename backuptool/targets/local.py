@@ -7,6 +7,7 @@ from pathlib import Path
 from .base import BaseTarget
 from .mixins import CommandGeneratorMixin
 from backuptool.utils.paths import plan_paths
+from backuptool.utils.helpers import SPACE_FACTOR, estimate_size_bytes, has_free_space
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,16 @@ class LocalTarget(BaseTarget, CommandGeneratorMixin):
         archive_path = None
         success = False
         try:
+            plans, notes = plan_paths(self.config.get('paths', []))
+            for note in notes:
+                logger.warning(note)
+
+            # Scale the disk check to the data actually being backed up (excludes honoured).
+            existing = [p.src for p in plans if Path(p.src).exists()]
+            estimate = estimate_size_bytes(existing, self.config.get('exclude', []))
+            if estimate and not has_free_space(self.tmp_dir, int(estimate * SPACE_FACTOR), f"target '{self.name}'"):
+                return None
+
             db_config = self.config.get('database', {})
             if db_config.get('enable'):
                 logger.info(f"Starting local DB backup for '{db_config['name']}'...")
@@ -61,10 +72,6 @@ class LocalTarget(BaseTarget, CommandGeneratorMixin):
             rsync_base_cmd = THROTTLE_LIST + ['rsync', '-a']
             for ex in self.config.get('exclude', []):
                 rsync_base_cmd.append(f"--exclude={ex}")
-
-            plans, notes = plan_paths(self.config.get('paths', []))
-            for note in notes:
-                logger.warning(note)
 
             for plan in plans:
                 src = Path(plan.src)

@@ -16,10 +16,28 @@ class CloudflareDestination(BaseDestination):
         self.max_size_mb = 24
 
     @retry(max_retries=3, delay=10, backoff=2)
+    def _upload_part(self, part_path: Path) -> str:
+        """Uploads one part and returns its download token. Retries never re-upload earlier parts."""
+        headers = {'Authorization': f'Bearer {self.api_token}'} if self.api_token else {}
+        with open(part_path, 'rb') as f:
+            response = requests.post(
+                f"{self.worker_url.rstrip('/')}/upload",
+                files={'file': (part_path.name, f, 'application/gzip')},
+                headers=headers,
+                timeout=300
+            )
+        response.raise_for_status()
+
+        token = response.json().get('token')
+        if not token:
+            # A part without a link would silently make the backup unrecoverable from this destination.
+            raise RuntimeError(f"Worker accepted '{part_path.name}' but returned no download token.")
+        return token
+
     def send(self, archive_path: Path, base_caption: str) -> bool | str:
         self.logger.info(f"Processing backup for {self.name}...")
         file_size_mb = os.path.getsize(archive_path) / (1024 * 1024)
-        
+
         files_to_send = []
         is_split = False
 
@@ -34,7 +52,6 @@ class CloudflareDestination(BaseDestination):
             files_to_send.append(archive_path)
 
         download_links = []
-        caption_update_string = ""
         try:
             total_parts = len(files_to_send)
             for i, part_path in enumerate(files_to_send):
@@ -42,42 +59,24 @@ class CloudflareDestination(BaseDestination):
                 if self.killer and self.killer.kill_now:
                     self.logger.warning("Upload interrupted by signal. Aborting Cloudflare upload.")
                     return False
-                
+
                 part_num = i + 1
                 self.logger.info(f"Uploading part {part_num}/{total_parts} to {self.name}...")
 
-                headers = {'Authorization': f'Bearer {self.api_token}'} if self.api_token else {}
-                
-                with open(part_path, 'rb') as f:
-                    response = requests.post(
-                        f"{self.worker_url.rstrip('/')}/upload",
-                        files={'file': (part_path.name, f, 'application/gzip')},
-                        headers=headers,
-                        timeout=300
-                    )
-                response.raise_for_status()
-                
-                token = response.json().get('token')
-                if not token:
-                    self.logger.error(f"Cloudflare upload for part {part_num} succeeded but worker did not return a token.")
-                    continue
-                
+                token = self._upload_part(part_path)
                 download_url = f"{self.worker_url.rstrip('/')}/download/{token}"
-                
+
                 link_text = f"• [Download Link (Part {part_num}/{total_parts})]({download_url})"
                 if not is_split:
                     link_text = f"• [Download Link]({download_url})"
-                
+
                 download_links.append(link_text)
                 self.logger.info(f"Part {part_num} uploaded. Download token: {token}")
 
-            if download_links:
-                caption_update_string = "\n" + "\n".join(download_links)
-            
             self.logger.info(f"Successfully uploaded all parts to {self.name}.")
-            return caption_update_string
-            
-        except requests.exceptions.RequestException as e:
+            return "\n" + "\n".join(download_links)
+
+        except (requests.exceptions.RequestException, RuntimeError) as e:
             self.logger.error(f"Error during {self.name} upload: {e}")
             raise
         finally:

@@ -7,6 +7,7 @@ from pathlib import Path
 from .base import BaseTarget
 from .mixins import CommandGeneratorMixin
 from backuptool.core.config import KNOWN_HOSTS_PATH
+from backuptool.utils.helpers import SPACE_FACTOR, sum_du_output
 from backuptool.utils.paths import plan_paths
 import paramiko
 from fabric import Connection
@@ -59,6 +60,20 @@ class RemoteTarget(BaseTarget, CommandGeneratorMixin):
         except Exception as e:
             logger.warning(f"Could not check remote disk space on '{path}': {e}. Proceeding with caution.")
             return True
+
+    def _estimate_remote_size(self, c, exclude_args: str) -> int | None:
+        """Size of the configured paths on the remote host (excludes honoured); None if unknown."""
+        plans, _ = plan_paths(self.config.get('paths', []))
+        if not plans:
+            return 0
+        sources = " ".join(shlex.quote(p.src) for p in plans)
+        try:
+            # du exits non-zero for unreadable/missing entries but still reports the rest.
+            out = c.run(f"du -sb {exclude_args} -- {sources} 2>/dev/null || true", hide=True).stdout
+            return sum_du_output(out)
+        except Exception as e:
+            logger.warning(f"Could not estimate remote data size: {e}")
+            return None
 
     def _remove_remote_dir(self, conn, path: str, connect_kwargs: dict) -> None:
         """Removes the remote work dir; retries on a fresh connection if the original one died."""
@@ -127,7 +142,11 @@ class RemoteTarget(BaseTarget, CommandGeneratorMixin):
             with self._connection(connect_kwargs) as c:
                 logger.info(f"Successfully connected to {c.host}")
                 
-                if not self._check_remote_space(c, "/tmp", required_mb=500):
+                required_mb = 500
+                estimate = self._estimate_remote_size(c, exclude_args)
+                if estimate:
+                    required_mb = max(required_mb, int(estimate * SPACE_FACTOR / (1024 * 1024)))
+                if not self._check_remote_space(c, "/tmp", required_mb=required_mb):
                     return None
 
                 timestamp = datetime.now(timezone.utc).strftime('%Y-%m-%d_%H-%M-%S')
