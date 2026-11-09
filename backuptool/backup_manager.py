@@ -127,7 +127,7 @@ class BackupManager:
             f"• *Archive SHA256:* `{archive_checksum}`\n"
         )
 
-        # Destinations that produce a download link (Cloudflare, S3 with generate_link) go first,
+        # Destinations that produce a download link (S3 with generate_link) go first,
         # one at a time, so the link - which only exists after a *successful* upload - can be put
         # into the captions of the rest. The first link obtained wins; later link-producing
         # destinations then simply upload in parallel with everyone else.

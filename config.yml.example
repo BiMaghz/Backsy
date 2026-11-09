@@ -76,12 +76,6 @@ compression:
 # SERVICES: Define where to send the final backup archives.
 # -------------------------------------------------------------------
 services:
-  cloudflare:
-    enable: true
-    worker_url: https://your-backup-worker.your-domain.workers.dev
-    # Required: must match the worker's API_TOKEN secret (the worker rejects uploads without it).
-    api_token: ${CLOUDFLARE_API_TOKEN}
-      
   telegram:
     enable: true
     token: ${TELEGRAM_TOKEN}

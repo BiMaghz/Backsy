@@ -203,6 +203,15 @@ configure_compression() {
     print_success "Compression set to: $algo"
 }
 
+# Cloudflare Worker/KV support was removed; a leftover enabled section makes every run fail.
+warn_removed_cloudflare() {
+    [ -f "$CONFIG_FILE" ] || return 0
+    if [ "$(yq eval '.services.cloudflare.enable // false' "$CONFIG_FILE" 2>/dev/null || echo false)" = "true" ]; then
+        print_warning "Cloudflare support has been removed, but 'services.cloudflare' is still enabled in config.yml."
+        print_warning "Backups will fail until you delete that section (and CLOUDFLARE_API_TOKEN from run_backup.sh)."
+    fi
+}
+
 # The config may have been switched to zstd by hand: make sure this server can honour it.
 ensure_compression_tools() {
     if [ "$(compression_algorithm)" = "zstd" ]; then
@@ -696,36 +705,6 @@ configure_services_and_secrets() {
         yq eval -i '.services.telegram.enable = false' "$CONFIG_FILE"
     fi
 
-    # Cloudflare
-    print_info "Cloudflare Worker + KV: A lightweight solution for fast backup transfer."
-    read -r -p "Enable Cloudflare? (y/n) [n]: " cf_q
-    if [[ "${cf_q,,}" == "y" ]]; then
-        
-        while true; do
-            read -r -p "Worker URL: " url
-            if [[ "$url" =~ ^https?:// ]]; then
-                break
-            else
-                print_warning "Invalid URL. Please start with http:// or https://"
-            fi
-        done
-
-        read -rs -p "API Token (Enter to skip): " tok; echo
-        export URL="$url"
-        
-        yq eval -i '.services.cloudflare.enable = true' "$CONFIG_FILE"
-        yq eval -i '.services.cloudflare.worker_url = strenv(URL) | .services.cloudflare.worker_url style="double"' "$CONFIG_FILE"
-        
-        if [ -n "$tok" ]; then
-            _add_secret "CLOUDFLARE_API_TOKEN" "$tok"
-            yq eval -i '.services.cloudflare.api_token = "${CLOUDFLARE_API_TOKEN}"' "$CONFIG_FILE"
-        else
-            yq eval -i 'del(.services.cloudflare.api_token)' "$CONFIG_FILE"
-        fi
-    else
-        yq eval -i '.services.cloudflare.enable = false' "$CONFIG_FILE"
-    fi
-
     # S3
     read -r -p "Enable S3 Storage (Arvan/R2/MinIO)? (y/n) [n]: " s3_q
     if [[ "${s3_q,,}" == "y" ]]; then
@@ -748,7 +727,7 @@ configure_services_and_secrets() {
         read -r -p "Generate S3 Download Links ((24h expiration))? (y/n) [y]: " s3_link_q
         if [[ "${s3_link_q:-y}" == "y" ]]; then
             yq eval -i '.services.s3.generate_link = true' "$CONFIG_FILE"
-            print_success "S3 Links Enabled and will be shown in Telegram if Cloudflare is disabled."
+            print_success "S3 Links Enabled and will be shown in Telegram."
         else
             yq eval -i '.services.s3.generate_link = false' "$CONFIG_FILE"
         fi
@@ -894,6 +873,7 @@ install_backsy() {
 }
 
 manage_backsy() {
+    warn_removed_cloudflare
     ensure_compression_tools
     while true; do
         clear

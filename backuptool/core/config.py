@@ -72,17 +72,6 @@ class TargetConfig(_Model):
         plan_paths(self.paths)  # fail fast on unusable path entries / aliases
         return self
 
-class CloudflareConfig(_Model):
-    enable: bool = False
-    worker_url: Optional[str] = None
-    api_token: Optional[str] = None
-
-    @model_validator(mode='after')
-    def check_required(self):
-        if self.enable and not self.worker_url:
-            raise ValueError("Cloudflare is enabled but 'worker_url' is missing.")
-        return self
-
 class TelegramConfig(_Model):
     enable: bool = False
     token: Optional[str] = None
@@ -112,7 +101,6 @@ class S3Config(_Model):
         return self
 
 class ServicesConfig(_Model):
-    cloudflare: Optional[CloudflareConfig] = Field(default_factory=lambda: CloudflareConfig(enable=False))
     telegram: Optional[TelegramConfig] = Field(default_factory=lambda: TelegramConfig(enable=False))
     s3: Optional[S3Config] = Field(default_factory=lambda: S3Config(enable=False))
 
@@ -173,6 +161,22 @@ def _resolve_env_vars(config_data):
 
     return config_data
 
+def _reject_removed_services(raw_config) -> None:
+    """
+    Cloudflare (Worker/KV) support was removed. Pydantic would silently ignore a leftover
+    `services.cloudflare` section, and the user would believe backups still go there, so an
+    enabled one is a hard error. A disabled leftover section is harmless and ignored.
+    """
+    services = raw_config.get('services') if isinstance(raw_config, dict) else None
+    cloudflare = services.get('cloudflare') if isinstance(services, dict) else None
+    if isinstance(cloudflare, dict) and cloudflare.get('enable'):
+        message = (
+            "Cloudflare (Worker/KV) support has been removed, but 'services.cloudflare' is still enabled in "
+            "config.yml. Remove that section and use S3 and/or Telegram instead."
+        )
+        logger.critical(message)
+        raise ValueError(message)
+
 def load_config() -> AppConfig:
     logger.info(f"Loading configuration from '{CONFIG_PATH}'...")
     try:
@@ -181,6 +185,8 @@ def load_config() -> AppConfig:
         
         if not raw_config:
             raise ValueError("Configuration file is empty or invalid.")
+
+        _reject_removed_services(raw_config)
 
         resolved_config_data = _resolve_env_vars(raw_config)
 

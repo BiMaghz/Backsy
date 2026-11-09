@@ -7,7 +7,7 @@
 | :--- | :--- |
 | **Files** | Local or Remote Server (via SSH). Supports **custom include/exclude paths** to filter your data. |
 | **Databases** | Supports MySQL, MariaDB and PostgreSQL via **Docker containers** or **native host installations**. |
-| **Destinations** | S3-compatible storage, Telegram, Cloudflare KV or S3 pre-signed temporary download links (shown in Telegram captions). |
+| **Destinations** | S3-compatible storage, Telegram, or S3 pre-signed temporary download links (shown in Telegram captions). |
 | **Monitoring** | Integrated **Healthchecks** (pinging Healthchecks.io or Uptime Kuma) and **Notification Only** mode (send alerts/logs to Telegram without uploading files). |
 | **Security** | Secured with **GPG encryption**. |
 
@@ -25,14 +25,6 @@ After installation, you can run the same command again to access the management 
 ---
 
 ### Configuration Guide
-
-#### Cloudflare Worker
-
-1.  **Create Worker:** In Cloudflare Dashboard > **Workers & Pages**, create a new worker.
-2.  **Deploy Code:** Paste the contents of [worker.js](https://raw.githubusercontent.com/BiMaghz/Backsy/main/backuptool/cloudflare-worker/worker.js) and deploy.
-3.  **KV Namespace:** In Worker Settings > **Variables**, add a KV Namespace binding named `BACKUP_KV` (Create a new namespace if needed).
-4.  **API Token (required):** In Variables, add `API_TOKEN` with a strong password (click Encrypt). Use this same token during Backsy setup. A worker without `API_TOKEN` rejects all uploads.
-5.  **Redeploy:** Go to the deployments tab and redeploy to apply changes.
 
 #### Compression (gzip / zstd)
 
