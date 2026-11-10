@@ -16,7 +16,7 @@ class SendResult:
 
 class BaseDestination(ABC):
     config_model: ClassVar[type[BaseModel]]   # validated settings class for this destination
-    produces_link: bool = False               # True: upload first, so the link can go into the other captions
+    uses_link_caption: bool = False           # True: its message carries other destinations' download links
 
     def __init__(self, name: str, config: BaseModel | dict, killer=None):
         self._name = name

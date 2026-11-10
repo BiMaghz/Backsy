@@ -9,19 +9,21 @@ from backuptool.utils.helpers import retry
 class S3Destination(BaseDestination):
     config_model = S3Config
 
-    def __init__(self, config: S3Config | dict, killer=None):
-        super().__init__('S3', config, killer)
+    def __init__(self, config: S3Config | dict, killer=None, name: str | None = None):
+        super().__init__(name or 'S3', config, killer)
         self.endpoint_url = self.config.endpoint_url
         self.access_key = self.config.access_key
         self.secret_key = self.config.secret_key
         self.bucket_name = self.config.bucket_name
         self.region_name = self.config.region_name
         self.generate_link = self.config.generate_link
+        self.prefix = self.config.prefix or ''
         self.link_expiration = 86400
 
         s3_config = Config(
             signature_version='s3v4',
-            retries={'max_attempts': 3}
+            retries={'max_attempts': 3},
+            s3={'addressing_style': self.config.addressing_style}
         )
 
         self.s3_client = boto3.client(
@@ -32,10 +34,6 @@ class S3Destination(BaseDestination):
             region_name=self.region_name,
             config=s3_config
         )
-
-    @property
-    def produces_link(self) -> bool:
-        return self.generate_link
 
     def get_presigned_url(self, filename: str) -> str | None:
         if not self.generate_link:
@@ -62,7 +60,7 @@ class S3Destination(BaseDestination):
             return SendResult(False, detail="interrupted by signal")
         self.logger.info(f"Processing backup for {self.name}...")
         file_size_mb = archive_path.stat().st_size / (1024 * 1024)
-        object_name = archive_path.name
+        object_name = f"{self.prefix}{archive_path.name}"
 
         self.logger.info(f"Uploading '{object_name}' ({file_size_mb:.2f} MB) to bucket '{self.bucket_name}'...")
         self._upload(archive_path, object_name)

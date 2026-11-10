@@ -7,6 +7,7 @@ from backuptool.utils.helpers import retry, split_file, cleanup_files
 
 class TelegramDestination(BaseDestination):
     config_model = TelegramConfig
+    uses_link_caption = True
 
     def __init__(self, config: TelegramConfig | dict, killer=None):
         super().__init__('Telegram', config, killer)

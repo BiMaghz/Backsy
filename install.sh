@@ -662,6 +662,167 @@ configure_target() {
     print_success "Target Configured."
 }
 
+# Env-var prefix for an S3 destination's secrets: "offsite-2" -> S3_OFFSITE_2
+_s3_env_prefix() {
+    printf 'S3_%s' "$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]' | tr -c 'A-Z0-9' '_')"
+}
+
+# True if an existing S3 destination would use the same secret names (e.g. "a-b" and "a_b").
+_s3_prefix_in_use() {
+    local wanted="$1" existing
+    while IFS= read -r existing; do
+        [ -n "$existing" ] || continue
+        if [ "$(_s3_env_prefix "$existing")" = "$wanted" ]; then
+            return 0
+        fi
+    done < <(yq eval '.services.s3 | keys | .[]' "$CONFIG_FILE" 2>/dev/null || true)
+    return 1
+}
+
+# Older configs keep one S3 block directly under `s3:`. Turn it into the named destination "default"
+# so further destinations can be added next to it (mixing both formats is rejected by Backsy).
+migrate_legacy_s3() {
+    [ -f "$CONFIG_FILE" ] || return 0
+    if [ "$(yq eval '.services.s3 | (has("enable") or has("bucket_name"))' "$CONFIG_FILE" 2>/dev/null || echo false)" = "true" ]; then
+        yq eval -i '.services.s3 = {"default": .services.s3}' "$CONFIG_FILE"
+        print_info "Converted the existing S3 settings to a named destination: 'default'."
+    fi
+}
+
+# Adds one or more named S3 destinations to config.yml (used by the wizard and the manager menu).
+configure_s3_destinations() {
+    _init_config
+    migrate_legacy_s3
+
+    local s3_name s3_url s3_bucket s3_region s3_prefix s3_style s3_access s3_secret s3_link_q more envp ans links
+    # Telegram shows one link (the first destination with links enabled wins), so offer it once.
+    local default_link="y"
+    if [ "$(yq eval '[.services.s3[] | select(.generate_link == true)] | length' "$CONFIG_FILE" 2>/dev/null || echo 0)" != "0" ]; then
+        default_link="n"
+    fi
+
+    while true; do
+        while true; do
+            read -r -p "Destination name (e.g. primary, offsite): " s3_name
+            if ! _valid_target_name "$s3_name"; then
+                print_error "Use 1-64 letters, digits, '.', '_' or '-' (starting with a letter or digit)."
+                continue
+            fi
+            if [ "$(S3_NAME="$s3_name" yq eval '.services.s3 | has(strenv(S3_NAME))' "$CONFIG_FILE" 2>/dev/null || echo false)" = "true" ]; then
+                print_error "A destination named '$s3_name' already exists."
+                continue
+            fi
+            envp=$(_s3_env_prefix "$s3_name")
+            if _s3_prefix_in_use "$envp"; then
+                print_error "That name would reuse the secret names ${envp}_*. Please pick a different one."
+                continue
+            fi
+            break
+        done
+
+        while true; do
+            read -r -p "Endpoint URL (e.g. https://s3.ir-thr-at1.arvanstorage.ir): " s3_url
+            if [[ "$s3_url" =~ ^https?:// ]]; then
+                break
+            fi
+            print_warning "Invalid URL. Please start with http:// or https://"
+        done
+
+        read -r -p "Bucket Name: " s3_bucket
+        read -r -p "Region Name (optional, press Enter): " s3_region
+        read -r -p "Key prefix inside the bucket, e.g. backsy/ (optional, press Enter): " s3_prefix
+        echo "Addressing style: 1) auto (default)   2) path (MinIO and some providers)   3) virtual"
+        read -r -p "Choose [1]: " ans
+        case "${ans:-1}" in
+            2) s3_style="path" ;;
+            3) s3_style="virtual" ;;
+            *) s3_style="auto" ;;
+        esac
+
+        read -rs -p "Access Key: " s3_access; echo
+        read -rs -p "Secret Key: " s3_secret; echo
+
+        links=false
+        read -r -p "Generate S3 Download Links (24h expiration)? (y/n) [$default_link]: " s3_link_q
+        ans="${s3_link_q:-$default_link}"
+        if [[ "${ans,,}" == "y" ]]; then
+            links=true
+            default_link="n"
+            print_success "S3 Links Enabled and will be shown in Telegram."
+        fi
+
+        _add_secret "${envp}_ACCESS_KEY" "$s3_access"
+        _add_secret "${envp}_SECRET_KEY" "$s3_secret"
+
+        export S3_NAME="$s3_name" S3_URL="$s3_url" S3_BUCKET="$s3_bucket" S3_REGION="$s3_region" \
+               S3_PREFIX="$s3_prefix" S3_STYLE="$s3_style" S3_LINKS="$links" \
+               S3_AK_REF="\${${envp}_ACCESS_KEY}" S3_SK_REF="\${${envp}_SECRET_KEY}"
+        yq eval -i '
+            .services.s3[strenv(S3_NAME)].enable = true |
+            .services.s3[strenv(S3_NAME)].endpoint_url = strenv(S3_URL) |
+            .services.s3[strenv(S3_NAME)].endpoint_url style="double" |
+            .services.s3[strenv(S3_NAME)].bucket_name = strenv(S3_BUCKET) |
+            .services.s3[strenv(S3_NAME)].addressing_style = strenv(S3_STYLE) |
+            .services.s3[strenv(S3_NAME)].generate_link = (strenv(S3_LINKS) == "true") |
+            .services.s3[strenv(S3_NAME)].access_key = strenv(S3_AK_REF) |
+            .services.s3[strenv(S3_NAME)].access_key style="double" |
+            .services.s3[strenv(S3_NAME)].secret_key = strenv(S3_SK_REF) |
+            .services.s3[strenv(S3_NAME)].secret_key style="double"
+        ' "$CONFIG_FILE"
+        if [ -n "$s3_region" ]; then
+            yq eval -i '.services.s3[strenv(S3_NAME)].region_name = strenv(S3_REGION)' "$CONFIG_FILE"
+        fi
+        if [ -n "$s3_prefix" ]; then
+            yq eval -i '.services.s3[strenv(S3_NAME)].prefix = strenv(S3_PREFIX)' "$CONFIG_FILE"
+        fi
+        unset S3_NAME S3_URL S3_BUCKET S3_REGION S3_PREFIX S3_STYLE S3_LINKS S3_AK_REF S3_SK_REF
+
+        print_success "S3 destination '$s3_name' added."
+        read -r -p "Add another S3 destination? (y/n) [n]: " more
+        if [[ "${more,,}" != "y" ]]; then
+            break
+        fi
+    done
+}
+
+# Adds the secrets collected by _add_secret to an existing runner (manager mode: the runner already exists).
+append_runner_secrets() {
+    if [ ! -f "$RUN_SCRIPT" ] || ! grep -q '^cd "\$PROJECT_PATH"' "$RUN_SCRIPT"; then
+        print_error "Could not update $RUN_SCRIPT automatically. Add these lines to it, before the 'cd' line:"
+        local k
+        for k in "${G_SECRET_VARS[@]}"; do echo "export $k='<value>'"; done
+        return 1
+    fi
+    local tmp line key val safe_val inserted=false
+    tmp=$(mktemp)
+    chmod 600 "$tmp"
+    while IFS= read -r line; do
+        if [ "$inserted" = false ] && [[ "$line" == 'cd "$PROJECT_PATH"'* ]]; then
+            for key in "${G_SECRET_VARS[@]}"; do
+                val="${G_SECRET_VALUES[$key]}"
+                safe_val="${val//\'/\'\\\'\'}"
+                echo "export $key='$safe_val'" >> "$tmp"
+            done
+            echo >> "$tmp"
+            inserted=true
+        fi
+        printf '%s\n' "$line" >> "$tmp"
+    done < "$RUN_SCRIPT"
+    install -m 700 "$tmp" "$RUN_SCRIPT"
+    rm -f "$tmp"
+}
+
+# Manager action: add S3 destinations to a running installation.
+add_s3_from_manager() {
+    print_header "Add S3 Destination"
+    G_SECRET_VARS=()
+    G_SECRET_VALUES=()
+    configure_s3_destinations
+    if [ "${#G_SECRET_VARS[@]}" -gt 0 ]; then
+        append_runner_secrets && print_success "Credentials saved to $RUN_SCRIPT"
+    fi
+}
+
 configure_services_and_secrets() {
     print_header "Services Configuration"
     _init_config
@@ -705,46 +866,10 @@ configure_services_and_secrets() {
         yq eval -i '.services.telegram.enable = false' "$CONFIG_FILE"
     fi
 
-    # S3
-    read -r -p "Enable S3 Storage (Arvan/R2/MinIO)? (y/n) [n]: " s3_q
+    # S3 (one or more named destinations)
+    read -r -p "Enable S3 Storage (Arvan/R2/MinIO/AWS)? (y/n) [n]: " s3_q
     if [[ "${s3_q,,}" == "y" ]]; then
-        
-        while true; do
-            read -r -p "Endpoint URL (e.g. https://s3.ir-thr-at1.arvanstorage.ir): " s3_url
-            if [[ "$s3_url" =~ ^https?:// ]]; then
-                break
-            else
-                print_warning "Invalid URL. Please start with http:// or https://"
-            fi
-        done
-
-        read -r -p "Bucket Name: " s3_bucket
-        read -r -p "Region Name (optional, press Enter): " s3_region
-        
-        read -rs -p "Access Key: " s3_access; echo
-        read -rs -p "Secret Key: " s3_secret; echo
-
-        read -r -p "Generate S3 Download Links ((24h expiration))? (y/n) [y]: " s3_link_q
-        if [[ "${s3_link_q:-y}" == "y" ]]; then
-            yq eval -i '.services.s3.generate_link = true' "$CONFIG_FILE"
-            print_success "S3 Links Enabled and will be shown in Telegram."
-        else
-            yq eval -i '.services.s3.generate_link = false' "$CONFIG_FILE"
-        fi
-
-        _add_secret "S3_ACCESS_KEY" "$s3_access"
-        _add_secret "S3_SECRET_KEY" "$s3_secret"
-        
-        yq eval -i '.services.s3.enable = true' "$CONFIG_FILE"
-        yq eval -i ".services.s3.endpoint_url = \"$s3_url\" | .services.s3.endpoint_url style=\"double\"" "$CONFIG_FILE"
-        yq eval -i ".services.s3.bucket_name = \"$s3_bucket\"" "$CONFIG_FILE"
-        if [ -n "$s3_region" ]; then
-            yq eval -i ".services.s3.region_name = \"$s3_region\"" "$CONFIG_FILE"
-        fi
-        yq eval -i '.services.s3.access_key = "${S3_ACCESS_KEY}"' "$CONFIG_FILE"
-        yq eval -i '.services.s3.secret_key = "${S3_SECRET_KEY}"' "$CONFIG_FILE"
-    else
-        yq eval -i '.services.s3.enable = false' "$CONFIG_FILE"
+        configure_s3_destinations
     fi
 
     # Encryption Setup
@@ -883,6 +1008,7 @@ manage_backsy() {
         echo "3) View Logs"
         echo "4) Trust SSH Host Keys"
         echo "5) Change Compression (gzip/zstd)"
+        echo "6) Add S3 Destination"
         echo "9) Uninstall"
         echo "q) Quit"
         read -r -p "> " opt
@@ -892,6 +1018,7 @@ manage_backsy() {
             3) tail -n 50 -f "$LOG_FILE";;
             4) trust_all_remote_hosts; press_enter ;;
             5) configure_compression; press_enter ;;
+            6) add_s3_from_manager; press_enter ;;
             9) uninstall_backsy; exit 0 ;;
             q) exit 0 ;;
             *) ;;

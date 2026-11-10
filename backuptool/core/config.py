@@ -93,6 +93,18 @@ class S3Config(_Model):
     secret_key: Optional[str] = None
     region_name: Optional[str] = None
     generate_link: bool  = False
+    prefix: Optional[str] = None                       # key prefix inside the bucket, e.g. "backsy/"
+    addressing_style: Literal['auto', 'path', 'virtual'] = 'auto'   # path-style is needed by some providers (e.g. MinIO)
+
+    @field_validator('prefix')
+    @classmethod
+    def normalize_prefix(cls, value):
+        if value is None:
+            return None
+        value = value.strip().lstrip('/')
+        if not value:
+            return None
+        return value if value.endswith('/') else value + '/'
 
     @model_validator(mode='after')
     def check_required(self):
@@ -102,7 +114,45 @@ class S3Config(_Model):
 
 class ServicesConfig(_Model):
     telegram: Optional[TelegramConfig] = Field(default_factory=lambda: TelegramConfig(enable=False))
-    s3: Optional[S3Config] = Field(default_factory=lambda: S3Config(enable=False))
+    # Any number of named S3 destinations: s3: {primary: {...}, offsite: {...}}
+    s3: Dict[str, S3Config] = Field(default_factory=dict)
+
+    @field_validator('s3', mode='before')
+    @classmethod
+    def normalize_s3(cls, value):
+        if value is None:
+            return {}
+        if not isinstance(value, dict):
+            raise ValueError("'services.s3' must be a mapping of destination names to their settings.")
+        if all(isinstance(entry, dict) for entry in value.values()):
+            # Named destinations (also the empty map). An entry is enabled unless it says `enable: false`.
+            return {name: {'enable': True, **entry} for name, entry in value.items()}
+        if set(value) <= set(S3Config.model_fields):
+            # Older format: one destination written directly under `s3:`. Keep it working as "default".
+            return {'default': value}
+        raise ValueError(
+            "'services.s3' must be either a map of named destinations (s3: {primary: {...}, offsite: {...}}) "
+            "or the older single-destination block; it looks like a mix of both."
+        )
+
+    @field_validator('s3')
+    @classmethod
+    def check_s3_destinations(cls, destinations):
+        bad = [name for name in destinations if not _TARGET_NAME.match(name)]
+        if bad:
+            raise ValueError(
+                f"Invalid S3 destination name(s): {bad}. Use 1-64 letters, digits, '.', '_' or '-', "
+                f"starting with a letter or digit."
+            )
+        seen: dict[tuple, str] = {}
+        for name, destination in destinations.items():
+            if not destination.enable:
+                continue
+            key = (destination.endpoint_url or '', destination.bucket_name, destination.prefix or '')
+            if key in seen:
+                raise ValueError(f"S3 destinations '{seen[key]}' and '{name}' point to the same bucket and prefix.")
+            seen[key] = name
+        return destinations
 
 class MonitoringConfig(_Model):
     healthcheck_url: Optional[str] = None

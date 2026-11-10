@@ -62,11 +62,18 @@ class BackupManager:
 
     def _initialize_destinations(self) -> dict[str, BaseDestination]:
         destinations = {}
-        for name, destination_class in DESTINATION_TYPES.items():
-            service_config = getattr(self.config.services, name)
-            if service_config.enable:
-                logger.info(f"Initializing destination: {name}")
-                destinations[name] = destination_class(service_config, self.killer)
+        for service, destination_class in DESTINATION_TYPES.items():
+            configured = getattr(self.config.services, service)
+            if isinstance(configured, dict):
+                # Several named destinations of one kind, e.g. "s3:primary" and "s3:offsite".
+                for instance, service_config in configured.items():
+                    name = f"{service}:{instance}"
+                    if service_config.enable:
+                        logger.info(f"Initializing destination: {name}")
+                        destinations[name] = destination_class(service_config, self.killer, name=name)
+            elif configured.enable:
+                logger.info(f"Initializing destination: {service}")
+                destinations[service] = destination_class(configured, self.killer)
         return destinations
 
     def _sweep_tmp_dir(self) -> None:
@@ -106,13 +113,24 @@ class BackupManager:
             logger.error(f"Destination '{name}' raised unexpectedly: {exc}", exc_info=True)
             return SendResult(False, detail=f"{type(exc).__name__}: {exc}")
 
+    def _deliver_all(self, destinations: dict[str, BaseDestination], archive_path: Path,
+                     base_caption: str, link_caption: str) -> dict[str, SendResult]:
+        """Sends to all given destinations at once. Results come back in the order given (= config order)."""
+        if not destinations:
+            return {}
+        logger.info(f"--- Sending to {list(destinations)} in parallel ---")
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(destinations)) as executor:
+            futures = {
+                name: executor.submit(self._deliver, name, destination, archive_path, base_caption, link_caption)
+                for name, destination in destinations.items()
+            }
+            return {name: future.result() for name, future in futures.items()}
+
     def _send_to_destinations(self, archive_path: Path, target_name: str) -> list[str]:
         """Sends the archive everywhere. Returns the names of destinations that failed."""
         if not self.destinations:
             logger.warning("No destinations enabled. Backup archive is only available locally in temp.")
             return []
-
-        failed: list[str] = []
 
         total_size_mb = archive_path.stat().st_size / (1024 * 1024)
 
@@ -127,35 +145,18 @@ class BackupManager:
             f"• *Archive SHA256:* `{archive_checksum}`\n"
         )
 
-        # Destinations that produce a download link (S3 with generate_link) go first,
-        # one at a time, so the link - which only exists after a *successful* upload - can be put
-        # into the captions of the rest. The first link obtained wins; later link-producing
-        # destinations then simply upload in parallel with everyone else.
-        link_caption = ""
-        parallel: dict[str, BaseDestination] = {}
-        for name, destination in self.destinations.items():
-            if destination.produces_link and not link_caption:
-                logger.info(f"--- Processing '{name}' first (its link goes into the other captions) ---")
-                result = self._deliver(name, destination, archive_path, base_caption, "")
-                if not result.ok:
-                    failed.append(name)
-                elif result.link:
-                    link_caption = result.link
-            else:
-                parallel[name] = destination
+        # Everything that just stores the archive (S3 destinations) uploads in parallel, first.
+        # The first download link produced by a *successful* upload (in config order, i.e. the first
+        # S3 destination with generate_link) is then handed to the destinations whose message carries
+        # links (Telegram), so a failed upload never leaves a dead link in a caption.
+        stores = {n: d for n, d in self.destinations.items() if not d.uses_link_caption}
+        messengers = {n: d for n, d in self.destinations.items() if d.uses_link_caption}
 
-        if parallel:
-            logger.info(f"--- Processing remaining destinations in parallel: {list(parallel.keys())} ---")
-            with concurrent.futures.ThreadPoolExecutor(max_workers=len(parallel)) as executor:
-                futures = {
-                    executor.submit(self._deliver, name, destination, archive_path, base_caption, link_caption): name
-                    for name, destination in parallel.items()
-                }
-                for future in concurrent.futures.as_completed(futures):
-                    if not future.result().ok:
-                        failed.append(futures[future])
+        results = self._deliver_all(stores, archive_path, base_caption, "")
+        link_caption = next((r.link for r in results.values() if r.ok and r.link), "")
+        results.update(self._deliver_all(messengers, archive_path, base_caption, link_caption))
 
-        return failed
+        return [name for name in self.destinations if not results[name].ok]
 
     def _encrypt(self, archive_path: Path) -> Path | None:
         """Returns the path to upload, or None if encryption was required but failed."""

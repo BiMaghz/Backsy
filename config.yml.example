@@ -83,13 +83,24 @@ services:
     topic_id: ${TELEGRAM_TOPIC_ID}
     send_file: false
 
+  # Any number of S3-compatible destinations, each with a name of your choice. Every backup is
+  # uploaded to all enabled ones at the same time; if one fails you are alerted, and the others
+  # still receive their copy. Give each its own credentials (S3_<NAME>_ACCESS_KEY, ...).
   s3:
-    enable: true
-    endpoint_url: https://<ACCOUNT_ID>.r2.cloudflarestorage.com
-    bucket_name: backups
-    access_key: ${S3_ACCESS_KEY}
-    secret_key: ${S3_SECRET_KEY}
-    generate_link: false
+    primary:
+      endpoint_url: https://<ACCOUNT_ID>.r2.cloudflarestorage.com
+      bucket_name: backups
+      access_key: ${S3_PRIMARY_ACCESS_KEY}
+      secret_key: ${S3_PRIMARY_SECRET_KEY}
+      generate_link: false           # 24h download link in the Telegram message (needs read access; first one wins)
+      # prefix: backsy/              # optional folder inside the bucket
+      # addressing_style: auto       # auto | path | virtual  (MinIO and some providers need "path")
+    offsite:
+      enable: false                  # entries are enabled unless you set this to false
+      endpoint_url: https://s3.example.com
+      bucket_name: backups-offsite
+      access_key: ${S3_OFFSITE_ACCESS_KEY}
+      secret_key: ${S3_OFFSITE_SECRET_KEY}
 
 monitoring:
   healthcheck_url: https://hc-ping.com/uuid
