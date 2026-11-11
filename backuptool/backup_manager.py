@@ -105,23 +105,23 @@ class BackupManager:
             return False
 
     def _deliver(self, name: str, destination: BaseDestination, archive_path: Path,
-                 base_caption: str, link_caption: str) -> SendResult:
+                 base_caption: str, link_caption: str, target: str) -> SendResult:
         # Destinations report failures themselves; this only guards against a bug in one of them.
         try:
-            return destination.send(archive_path, base_caption, link_caption)
+            return destination.send(archive_path, base_caption, link_caption, target=target)
         except Exception as exc:
             logger.error(f"Destination '{name}' raised unexpectedly: {exc}", exc_info=True)
             return SendResult(False, detail=f"{type(exc).__name__}: {exc}")
 
     def _deliver_all(self, destinations: dict[str, BaseDestination], archive_path: Path,
-                     base_caption: str, link_caption: str) -> dict[str, SendResult]:
+                     base_caption: str, link_caption: str, target: str) -> dict[str, SendResult]:
         """Sends to all given destinations at once. Results come back in the order given (= config order)."""
         if not destinations:
             return {}
         logger.info(f"--- Sending to {list(destinations)} in parallel ---")
         with concurrent.futures.ThreadPoolExecutor(max_workers=len(destinations)) as executor:
             futures = {
-                name: executor.submit(self._deliver, name, destination, archive_path, base_caption, link_caption)
+                name: executor.submit(self._deliver, name, destination, archive_path, base_caption, link_caption, target)
                 for name, destination in destinations.items()
             }
             return {name: future.result() for name, future in futures.items()}
@@ -152,9 +152,9 @@ class BackupManager:
         stores = {n: d for n, d in self.destinations.items() if not d.uses_link_caption}
         messengers = {n: d for n, d in self.destinations.items() if d.uses_link_caption}
 
-        results = self._deliver_all(stores, archive_path, base_caption, "")
+        results = self._deliver_all(stores, archive_path, base_caption, "", target_name)
         link_caption = next((r.link for r in results.values() if r.ok and r.link), "")
-        results.update(self._deliver_all(messengers, archive_path, base_caption, link_caption))
+        results.update(self._deliver_all(messengers, archive_path, base_caption, link_caption, target_name))
 
         return [name for name in self.destinations if not results[name].ok]
 

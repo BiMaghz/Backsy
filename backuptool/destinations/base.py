@@ -28,14 +28,14 @@ class BaseDestination(ABC):
     def name(self) -> str:
         return self._name
 
-    def send(self, archive_path: Path, base_caption: str, link_caption: str = "") -> SendResult:
+    def send(self, archive_path: Path, base_caption: str, link_caption: str = "", target: str | None = None) -> SendResult:
         """Delivery failures never raise: they are reported as SendResult(ok=False)."""
         try:
-            return self._send(archive_path, base_caption, link_caption)
+            return self._send(archive_path, base_caption, link_caption, target)
         except Exception as e:
             self.logger.error(f"Upload to {self.name} failed: {e}")
             return SendResult(False, detail=f"{type(e).__name__}: {e}")
 
     @abstractmethod
-    def _send(self, archive_path: Path, base_caption: str, link_caption: str) -> SendResult:
+    def _send(self, archive_path: Path, base_caption: str, link_caption: str, target: str | None) -> SendResult:
         pass

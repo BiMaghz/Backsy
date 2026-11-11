@@ -662,6 +662,10 @@ configure_target() {
     print_success "Target Configured."
 }
 
+_is_positive_int() {
+    [[ "$1" =~ ^[1-9][0-9]*$ ]]
+}
+
 # Env-var prefix for an S3 destination's secrets: "offsite-2" -> S3_OFFSITE_2
 _s3_env_prefix() {
     printf 'S3_%s' "$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]' | tr -c 'A-Z0-9' '_')"
@@ -694,7 +698,7 @@ configure_s3_destinations() {
     _init_config
     migrate_legacy_s3
 
-    local s3_name s3_url s3_bucket s3_region s3_prefix s3_style s3_access s3_secret s3_link_q more envp ans links
+    local s3_name s3_url s3_bucket s3_region s3_prefix s3_style s3_access s3_secret s3_link_q s3_layout_q s3_keep_last s3_keep_days s3_dry more envp ans links
     # Telegram shows one link (the first destination with links enabled wins), so offer it once.
     local default_link="y"
     if [ "$(yq eval '[.services.s3[] | select(.generate_link == true)] | length' "$CONFIG_FILE" 2>/dev/null || echo 0)" != "0" ]; then
@@ -739,6 +743,34 @@ configure_s3_destinations() {
             *) s3_style="auto" ;;
         esac
 
+        read -r -p "Put each target in its own folder (<prefix><target>/)? (y/n) [n]: " s3_layout_q
+
+        # Retention (optional). Deleting needs list+delete permission on the bucket; without it, or when
+        # the provider's own lifecycle rules handle expiry, just press Enter to keep everything.
+        s3_keep_last=""; s3_keep_days=""; s3_dry="false"
+        echo "Retention deletes old backups automatically (needs permission to list and delete objects)."
+        while true; do
+            read -r -p "Keep only the newest N backups per target [Enter = keep everything]: " s3_keep_last
+            if [ -z "$s3_keep_last" ] || _is_positive_int "$s3_keep_last"; then
+                break
+            fi
+            print_warning "Please enter a whole number >= 1, or press Enter."
+        done
+        if [ -n "$s3_keep_last" ]; then
+            while true; do
+                read -r -p "...and also keep everything newer than D days [Enter = skip]: " s3_keep_days
+                if [ -z "$s3_keep_days" ] || _is_positive_int "$s3_keep_days"; then
+                    break
+                fi
+                print_warning "Please enter a whole number >= 1, or press Enter."
+            done
+            read -r -p "Preview first? (logs what would be deleted, deletes nothing) (y/n) [y]: " ans
+            if [[ "${ans:-y}" == "y" || "${ans:-y}" == "Y" ]]; then
+                s3_dry="true"
+                print_info "Dry run is ON. Set retention.dry_run to false in config.yml when the log looks right."
+            fi
+        fi
+
         read -rs -p "Access Key: " s3_access; echo
         read -rs -p "Secret Key: " s3_secret; echo
 
@@ -774,6 +806,21 @@ configure_s3_destinations() {
         fi
         if [ -n "$s3_prefix" ]; then
             yq eval -i '.services.s3[strenv(S3_NAME)].prefix = strenv(S3_PREFIX)' "$CONFIG_FILE"
+        fi
+        if [[ "${s3_layout_q,,}" == "y" ]]; then
+            yq eval -i '.services.s3[strenv(S3_NAME)].prefix_per_target = true' "$CONFIG_FILE"
+        fi
+        if [ -n "$s3_keep_last" ]; then
+            export S3_KEEP_LAST="$s3_keep_last" S3_DRY="$s3_dry"
+            yq eval -i '
+                .services.s3[strenv(S3_NAME)].retention.keep_last = (strenv(S3_KEEP_LAST) | tonumber) |
+                .services.s3[strenv(S3_NAME)].retention.dry_run = (strenv(S3_DRY) == "true")
+            ' "$CONFIG_FILE"
+            if [ -n "$s3_keep_days" ]; then
+                export S3_KEEP_DAYS="$s3_keep_days"
+                yq eval -i '.services.s3[strenv(S3_NAME)].retention.keep_days = (strenv(S3_KEEP_DAYS) | tonumber)' "$CONFIG_FILE"
+            fi
+            unset S3_KEEP_LAST S3_KEEP_DAYS S3_DRY
         fi
         unset S3_NAME S3_URL S3_BUCKET S3_REGION S3_PREFIX S3_STYLE S3_LINKS S3_AK_REF S3_SK_REF
 

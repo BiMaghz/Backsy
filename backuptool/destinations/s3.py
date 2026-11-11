@@ -1,13 +1,16 @@
 import boto3
+from datetime import datetime, timezone
 from botocore.exceptions import ClientError
 from botocore.config import Config
 from pathlib import Path
 from backuptool.core.config import S3Config
 from .base import BaseDestination, SendResult
 from backuptool.utils.helpers import retry
+from backuptool.utils.retention import select_expired
 
 class S3Destination(BaseDestination):
     config_model = S3Config
+    LIST_PAGE_SIZE = 1000
 
     def __init__(self, config: S3Config | dict, killer=None, name: str | None = None):
         super().__init__(name or 'S3', config, killer)
@@ -54,17 +57,73 @@ class S3Destination(BaseDestination):
     def _upload(self, archive_path: Path, object_name: str) -> None:
         self.s3_client.upload_file(str(archive_path), self.bucket_name, object_name)
 
-    def _send(self, archive_path: Path, base_caption: str, link_caption: str = "") -> SendResult:
+    def _key_prefix(self, target: str | None) -> str:
+        if self.config.prefix_per_target and target:
+            return f"{self.prefix}{target}/"
+        return self.prefix
+
+    def _apply_retention(self, target: str, key_prefix: str, current_key: str) -> None:
+        """Deletes this target's backups beyond the retention policy. Never touches anything else."""
+        policy = self.config.retention
+        paginator = self.s3_client.get_paginator('list_objects_v2')
+        names = set()
+        for page in paginator.paginate(Bucket=self.bucket_name, Prefix=key_prefix,
+                                       PaginationConfig={'PageSize': self.LIST_PAGE_SIZE}):
+            for obj in page.get('Contents', []):
+                rest = obj['Key'][len(key_prefix):]
+                if rest and '/' not in rest:   # direct children only: never descend into other folders
+                    names.add(rest)
+
+        current = current_key[len(key_prefix):]
+        names.add(current)   # the listing may lag behind the upload; the new backup always counts
+        expired = select_expired(names, target, policy.keep_last, policy.keep_days,
+                                 datetime.now(timezone.utc), protect=[current])
+        if not expired:
+            self.logger.info(f"Retention for {self.name}/{target}: nothing to delete.")
+            return
+
+        if policy.dry_run:
+            self.logger.warning(
+                f"Retention DRY RUN for {self.name}/{target}: would delete {len(expired)} backup(s): "
+                f"{', '.join(expired[:5])}{' ...' if len(expired) > 5 else ''} "
+                f"(set retention.dry_run to false to delete)."
+            )
+            return
+
+        deleted, first_error = 0, None
+        for name in expired:
+            try:
+                self.s3_client.delete_object(Bucket=self.bucket_name, Key=f"{key_prefix}{name}")
+                deleted += 1
+            except Exception as e:
+                first_error = first_error or e
+        if first_error is None:
+            self.logger.info(f"Retention for {self.name}/{target}: deleted {deleted} old backup(s).")
+        else:
+            self.logger.warning(
+                f"Retention for {self.name}/{target}: deleted {deleted} of {len(expired)} old backup(s); "
+                f"the rest failed (first error: {first_error}). Do the credentials allow deleting objects?"
+            )
+
+    def _send(self, archive_path: Path, base_caption: str, link_caption: str = "", target: str | None = None) -> SendResult:
         if self.killer and self.killer.kill_now:
             self.logger.warning("S3 upload aborted by signal.")
             return SendResult(False, detail="interrupted by signal")
         self.logger.info(f"Processing backup for {self.name}...")
         file_size_mb = archive_path.stat().st_size / (1024 * 1024)
-        object_name = f"{self.prefix}{archive_path.name}"
+        key_prefix = self._key_prefix(target)
+        object_name = f"{key_prefix}{archive_path.name}"
 
         self.logger.info(f"Uploading '{object_name}' ({file_size_mb:.2f} MB) to bucket '{self.bucket_name}'...")
         self._upload(archive_path, object_name)
         self.logger.info(f"Successfully uploaded to S3: {self.bucket_name}/{object_name}")
+
+        # Only after a successful upload, and never allowed to fail the backup that just succeeded.
+        if self.config.retention and target:
+            try:
+                self._apply_retention(target, key_prefix, object_name)
+            except Exception as e:
+                self.logger.warning(f"Retention for {self.name} could not run ({e}); the backup itself was uploaded.")
 
         # Only after the upload succeeded, so a failed upload never leaves a dead link in a caption.
         url = self.get_presigned_url(object_name)

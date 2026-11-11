@@ -37,7 +37,7 @@ class TelegramDestination(BaseDestination):
             response = post(plain)
         response.raise_for_status()
 
-    def _send(self, archive_path: Path, base_caption: str, link_caption: str = "") -> SendResult:
+    def _send(self, archive_path: Path, base_caption: str, link_caption: str = "", target: str | None = None) -> SendResult:
         self.logger.info(f"Processing backup for {self.name}...")
 
         should_send_file = self.config.send_file

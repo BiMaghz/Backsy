@@ -94,7 +94,12 @@ services:
       secret_key: ${S3_PRIMARY_SECRET_KEY}
       generate_link: false           # 24h download link in the Telegram message (needs read access; first one wins)
       # prefix: backsy/              # optional folder inside the bucket
+      # prefix_per_target: true      # keys become <prefix><target>/<archive>
       # addressing_style: auto       # auto | path | virtual  (MinIO and some providers need "path")
+      # retention:                   # optional; nothing is ever deleted unless you set this
+      #   keep_last: 14              # always keep the newest 14 backups of each target
+      #   keep_days: 30              # ...and everything newer than 30 days (optional)
+      #   dry_run: true              # only log what would be deleted; set to false to really delete
     offsite:
       enable: false                  # entries are enabled unless you set this to false
       endpoint_url: https://s3.example.com

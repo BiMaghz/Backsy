@@ -85,6 +85,11 @@ class TelegramConfig(_Model):
             raise ValueError("Telegram is enabled but 'token' and/or 'chat_id' is missing.")
         return self
 
+class RetentionConfig(_Model):
+    keep_last: int = Field(ge=1)               # always keep at least the newest N backups of each target
+    keep_days: Optional[int] = Field(default=None, ge=1)   # ...and everything newer than this many days
+    dry_run: bool = False                      # only log what would be deleted
+
 class S3Config(_Model):
     enable: bool = False
     endpoint_url: Optional[str] = None
@@ -95,6 +100,8 @@ class S3Config(_Model):
     generate_link: bool  = False
     prefix: Optional[str] = None                       # key prefix inside the bucket, e.g. "backsy/"
     addressing_style: Literal['auto', 'path', 'virtual'] = 'auto'   # path-style is needed by some providers (e.g. MinIO)
+    prefix_per_target: bool = False            # keys become <prefix><target>/<archive>
+    retention: Optional[RetentionConfig] = None   # off unless configured: nothing is ever deleted by default
 
     @field_validator('prefix')
     @classmethod

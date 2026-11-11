@@ -67,3 +67,29 @@ services:
 * **Failures:** if any destination fails you get an alert, and the other destinations still receive their copy.
 * **Download links:** `generate_link` needs read access to the bucket. Only one link is shown in the Telegram message (the first destination, in config order, whose upload succeeded and has links enabled). Credentials that can only write are fine for destinations without links.
 * **Old configs:** a single `s3:` block written directly under `services` (with `enable`, `bucket_name`, ...) still works and is treated as one destination named `default`. Do not mix it with named destinations; the setup wizard and the manager's **Add S3 Destination** convert it for you.
+
+##### Folder layout and retention (optional)
+
+By default archives are stored as `<prefix><archive>`. With `prefix_per_target: true` each target gets its own folder: `<prefix><target>/<archive>`. Existing objects are never moved when you change this.
+
+Retention is **off unless you configure it**. Per destination:
+
+```yaml
+      retention:
+        keep_last: 14     # always keep the newest 14 backups of each target
+        keep_days: 30     # ...and everything newer than 30 days (optional)
+        dry_run: true     # only log what would be deleted; set to false once the log looks right
+```
+
+* It runs only after the backup was uploaded successfully to that destination, and a retention problem never fails the backup (you get a warning in the log).
+* It only ever deletes files that Backsy named (`<timestamp>_<target>.tar.gz|.tar.zst[.gpg]`) for **that target**, directly inside the destination's folder. Other files, sub-folders and other targets are left alone.
+* The newest `keep_last` backups and the one just uploaded are always kept; age is read from the timestamp in the file name.
+* It needs permission to list and delete objects in the bucket.
+
+**Script retention or bucket lifecycle rules?** Use `retention` when you want "keep the last N" (lifecycle rules can only expire by age) or the same behaviour on every provider. Use the provider's lifecycle rules for destinations whose credentials must be write-only (for example a hardened offsite bucket), or as a hard cap next to `retention`. Be generous with age-based rules: if backups ever stop, an age-based rule will eventually delete every backup you have. Example for AWS S3 (R2, MinIO and others offer similar rules; check what your provider supports):
+
+```json
+{"Rules": [{"ID": "expire-old-backups", "Status": "Enabled", "Filter": {"Prefix": "backsy/"}, "Expiration": {"Days": 90}}]}
+```
+
+`aws s3api put-bucket-lifecycle-configuration --bucket BUCKET --lifecycle-configuration file://lifecycle.json` (add `--endpoint-url` for non-AWS providers).
